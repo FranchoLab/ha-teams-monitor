@@ -1,0 +1,16 @@
+{
+  "name": "ha-teams-status-dev",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Development-only OpenSpec tooling; not required by the Python runtime",
+  "engines": {
+    "node": ">=24.22.0 <25"
+  },
+  "scripts": {
+    "openspec": "openspec",
+    "spec:validate": "openspec validate --all --strict"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.14.3"
+  }
+}

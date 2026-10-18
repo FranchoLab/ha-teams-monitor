@@ -1,0 +1,35 @@
+{
+  "name": "Teams status development",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venvs/ha-teams-status",
+    "OPENSPEC_TELEMETRY": "0",
+    "DO_NOT_TRACK": "1"
+  },
+  "mounts": [
+    "source=ha-teams-status-node-modules,target=${containerWorkspaceFolder}/node_modules,type=volume"
+  ],
+  "postCreateCommand": "sudo chown vscode:vscode node_modules && uv sync --frozen && uv run --frozen pre-commit install && npm ci --no-audit --no-fund",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "GitHub.copilot",
+        "GitHub.copilot-chat"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venvs/ha-teams-status/bin/python"
+      }
+    }
+  },
+  "features": {
+    "ghcr.io/roul/devcontainer-features/mise-node:1": {},
+    "ghcr.io/jrussellsmyth/devcontainer-features/openspec:1": {}
+  }
+}
