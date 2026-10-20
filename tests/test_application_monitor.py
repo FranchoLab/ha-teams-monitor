@@ -3,7 +3,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from ha_teams_status.application.monitor import DetectionError, ObserveMeeting
+from ha_teams_status.application.monitor import (
+    DetectionError,
+    MonitorMeeting,
+    ObserveMeeting,
+)
 from ha_teams_status.domain.observation import (
     MeetingObservation,
     ObservationReason,
@@ -23,6 +27,14 @@ class FakeDetector:
             raise self.error
         assert self.observation is not None
         return self.observation
+
+
+@dataclass
+class FakePublisher:
+    observations: list[MeetingObservation]
+
+    def publish(self, observation: MeetingObservation) -> None:
+        self.observations.append(observation)
 
 
 def test_use_case_returns_fresh_observation_unchanged() -> None:
@@ -82,3 +94,88 @@ def test_use_case_requires_positive_max_age() -> None:
             clock=lambda: NOW,
             max_age=timedelta(0),
         )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [ObservationState.JOINED, ObservationState.NOT_JOINED],
+)
+def test_monitor_publishes_confirmed_observation_states(state: ObservationState) -> None:
+    observation = MeetingObservation(state=state, observed_at=NOW)
+    publisher = FakePublisher(observations=[])
+    monitor = MonitorMeeting(
+        observe=ObserveMeeting(
+            detector=FakeDetector(observation=observation),
+            clock=lambda: NOW,
+            max_age=timedelta(seconds=30),
+        ),
+        publisher=publisher,
+        clock=lambda: NOW,
+    )
+
+    assert monitor.execute() is observation
+    assert [item.state for item in publisher.observations] == [state]
+
+
+def test_monitor_publishes_indeterminate_instead_of_not_joined() -> None:
+    observation = MeetingObservation(
+        state=ObservationState.INDETERMINATE,
+        observed_at=NOW,
+        reason=ObservationReason.SIGNAL_INCONCLUSIVE,
+    )
+    publisher = FakePublisher(observations=[])
+    monitor = MonitorMeeting(
+        observe=ObserveMeeting(
+            detector=FakeDetector(observation=observation),
+            clock=lambda: NOW,
+            max_age=timedelta(seconds=30),
+        ),
+        publisher=publisher,
+        clock=lambda: NOW,
+    )
+
+    result = monitor.execute()
+
+    assert result.state is ObservationState.INDETERMINATE
+    assert [item.state for item in publisher.observations] == [ObservationState.INDETERMINATE]
+
+
+def test_monitor_publishes_stale_observation_as_indeterminate() -> None:
+    stale_observation = MeetingObservation(
+        state=ObservationState.NOT_JOINED,
+        observed_at=NOW - timedelta(seconds=31),
+    )
+    publisher = FakePublisher(observations=[])
+    monitor = MonitorMeeting(
+        observe=ObserveMeeting(
+            detector=FakeDetector(observation=stale_observation),
+            clock=lambda: NOW,
+            max_age=timedelta(seconds=30),
+        ),
+        publisher=publisher,
+        clock=lambda: NOW,
+    )
+
+    result = monitor.execute()
+
+    assert result.state is ObservationState.INDETERMINATE
+    assert [item.state for item in publisher.observations] == [ObservationState.INDETERMINATE]
+
+
+def test_monitor_publishes_detection_failure_as_indeterminate() -> None:
+    publisher = FakePublisher(observations=[])
+    monitor = MonitorMeeting(
+        observe=ObserveMeeting(
+            detector=FakeDetector(error=DetectionError("private detector detail")),
+            clock=lambda: NOW,
+            max_age=timedelta(seconds=30),
+        ),
+        publisher=publisher,
+        clock=lambda: NOW,
+    )
+
+    result = monitor.execute()
+
+    assert result.state is ObservationState.INDETERMINATE
+    assert result.reason is ObservationReason.SIGNAL_UNAVAILABLE
+    assert [item.state for item in publisher.observations] == [ObservationState.INDETERMINATE]

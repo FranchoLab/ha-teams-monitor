@@ -1,12 +1,13 @@
 # Teams status for Home Assistant
 
-Python foundation for detecting an actually joined Teams meeting or call locally
-on macOS and Windows and publishing a binary sensor through MQTT.
+Standalone monitor for publishing a Teams meeting binary sensor to Home
+Assistant over MQTT. The monitor, configuration loader, and MQTT connector are
+implemented. Live detection is supported only by the validated macOS connector;
+Windows detection remains an unresolved feasibility gate, and Linux is for
+development and portable tests rather than live monitoring.
 
-**Foundation only:** there is no live detection, MQTT publishing, or startup
-agent yet. Windows detection is an unresolved feasibility gate. Nothing in this
-repository currently requires Microsoft tenant consent, a Home Assistant token,
-or production broker credentials.
+No startup agent, Microsoft tenant consent, Home Assistant API token, or
+production broker credentials are included or required.
 
 ## Development in VS Code
 
@@ -18,6 +19,10 @@ their committed locks; it does not initialize OpenSpec again.
 The container provides Python 3.12, uv 0.13.1, and Node 24.22.0 LTS.
 Its Python environment lives outside the workspace. A named volume isolates
 Linux Node dependencies from a native host installation.
+
+Python files are formatted by Ruff on save through the workspace settings.
+The container installs the Ruff VS Code extension automatically; when working
+natively, install the Ruff extension (`charliermarsh.ruff`) in VS Code.
 
 The container runs Linux. Develop the core, test fixtures, and MQTT connector
 there; run live Teams detectors and login agents **natively on macOS/Windows**.
@@ -44,8 +49,72 @@ environment from a Linux container. Node/OpenSpec are development tools only.
 On Windows, if PowerShell blocks `npm.ps1`, use `npm.cmd` rather than weakening
 your execution policy.
 
-Calling `ha-teams-status` without options deliberately exits with an error because
-monitoring is not implemented. It never reports a fake Off state.
+Create a local `monitor.conf` and replace the placeholders with the settings for
+your MQTT broker:
+
+```ini
+[mqtt]
+host = mqtt.example.invalid
+port = 8883
+username = YOUR_MQTT_USERNAME
+password = REPLACE_WITH_MQTT_PASSWORD
+discovery_prefix = homeassistant
+topic_prefix = ha_teams_status/teams
+tls = true
+
+[monitor]
+poll_interval_seconds = 5
+observation_max_age_seconds = 15
+heartbeat_interval_seconds = 10
+availability_expiry_seconds = 30
+
+[sensor]
+name = Teams meeting
+```
+
+The configured name also determines Home Assistant's initial entity ID. For
+example, `name = Francho reunido` produces
+`binary_sensor.teams_status_francho_reunido`. Home Assistant uses this default
+when the entity is first created; changing the name later does not rename an
+entity already in its entity registry, so rename that entity in Home Assistant
+if needed.
+
+Keep this file outside source control and readable only by the OS account that
+runs the monitor. On macOS/Linux, use `chmod 600 monitor.conf`; on Windows,
+restrict the file's Security permissions to that account. Start the monitor
+with the explicit config path:
+
+```text
+uv run --frozen ha-teams-status --config ./monitor.conf
+```
+
+Monitoring requires a valid configuration. `--help` and `--version` remain
+available without one. Detection failures and unsupported platforms are not
+reported as Off.
+
+## Home Assistant MQTT setup
+
+Enable Home Assistant's MQTT integration and connect it to the same broker
+before starting the monitor. Create a dedicated broker user for this process;
+it only needs permission to publish this sensor's discovery, state, and
+availability messages. The monitor does not subscribe to broker topics and
+does not require a Home Assistant API token.
+
+For a Mosquitto ACL file, grant the example user only these write topics (the
+discovery and topic prefixes must match `monitor.conf`):
+
+```text
+user YOUR_MQTT_USERNAME
+topic write homeassistant/binary_sensor/ha_teams_status/meeting/config
+topic write ha_teams_status/teams/state
+topic write ha_teams_status/teams/availability
+```
+
+Do not grant read or wildcard access. If either prefix is changed, update the
+ACL to the corresponding exact topics: `<discovery_prefix>/binary_sensor/ha_teams_status/meeting/config`,
+`<topic_prefix>/state`, and `<topic_prefix>/availability`. Use TLS with
+certificate validation when broker traffic crosses an untrusted network; do
+not disable certificate verification.
 
 ## Checks
 
@@ -75,8 +144,8 @@ Do not replace frozen restores with implicit updates.
 src/ha_teams_status/
   domain/         # Meeting concepts; no infrastructure imports
   application/    # Use cases and application-owned ports
-  adapters/       # Future macOS, Windows, MQTT/Home Assistant connectors
-  __main__.py     # CLI and future composition root
+  adapters/       # macOS detection, MQTT configuration and Home Assistant publisher
+  __main__.py     # CLI and composition root
 tests/            # CLI smoke tests and import-boundary checks
 openspec/         # Requirements and proposed changes
 ```
@@ -86,9 +155,10 @@ the domain and its own modules. Adapters depend inward on ports and domain types
 Only the composition root chooses concrete connectors. Core code must not import
 OS-specific libraries, MQTT clients, or Home Assistant payload formats.
 
-The domain now defines OS-neutral meeting observations, and the application owns
-the `MeetingDetector` port and observation use case. The CLI does not yet compose
-the detector, and MQTT/Home Assistant publishing remains separate work.
+The domain defines OS-neutral meeting observations. The application owns the
+detector and publisher ports; the CLI composes them with the macOS detector and
+Home Assistant MQTT adapter. MQTT and Home Assistant payload details stay in
+the adapter layer.
 
 The macOS Teams detector reads public IOKit power assertions. Its native matrix
 was recorded on Teams build `26276.505.5234.9924` and macOS `27.0.1 (26A434)`:
@@ -105,17 +175,18 @@ known assertion pair enables best-effort joined detection on a newer build; an
 unknown build without the pair remains indeterminate until its matrix is
 validated.
 
-Future adapters:
+Platform support and runtime behavior:
 
 - **Windows:** establish an accurate standard-user mechanism for current Teams.
   Do not assume classic Teams logs remain valid.
-- **MQTT:** encode discovery, state, availability, expiry, and reconnect behavior;
-  never depend on OS detector internals.
+- **MQTT:** discovery, state, availability, retained Last Will, heartbeat, and
+  reconnect handling are implemented; the adapter does not depend on detector
+  internals.
 
 No calendar, Busy status, microphone-only signal, or running process is a
 substitute for a proven joined-call signal. Detection failures must remain
-distinct from Not in call. Monitoring will require heartbeat expiry in addition
-to MQTT Last Will to avoid stale states after sleep or a hung detector.
+distinct from Not in call. Sensor state expiry complements the availability
+heartbeat and MQTT Last Will so an old joined state is not shown as current.
 
 ## OpenSpec and Copilot
 

@@ -20,6 +20,10 @@ class MeetingDetector(Protocol):
     def detect(self) -> MeetingObservation: ...
 
 
+class MeetingObservationPublisher(Protocol):
+    def publish(self, observation: MeetingObservation) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ObserveMeeting:
     detector: MeetingDetector
@@ -39,4 +43,23 @@ class ObserveMeeting:
                 observed_at=now,
                 reason=ObservationReason.STALE,
             )
+        return observation
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorMeeting:
+    observe: ObserveMeeting
+    publisher: MeetingObservationPublisher
+    clock: Callable[[], datetime]
+
+    def execute(self) -> MeetingObservation:
+        try:
+            observation = self.observe.execute()
+        except DetectionError:
+            observation = MeetingObservation(
+                state=ObservationState.INDETERMINATE,
+                observed_at=self.clock(),
+                reason=ObservationReason.SIGNAL_UNAVAILABLE,
+            )
+        self.publisher.publish(observation)
         return observation
