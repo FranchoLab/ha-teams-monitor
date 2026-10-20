@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1] / "src" / "ha_teams_status"
+OS_MODULES = {"ctypes", "os", "platform", "subprocess", "winreg"}
 
 
 def violations(source: str, module: str, is_package: bool) -> list[str]:
@@ -26,8 +27,12 @@ def violations(source: str, module: str, is_package: bool) -> list[str]:
                 parts = name.split(".")
                 if len(parts) < 2 or parts[1] not in allowed[layer]:
                     invalid.append(name)
-            elif name.split(".")[0] not in __import__("sys").stdlib_module_names:
-                invalid.append(name)
+            else:
+                top_level = name.split(".")[0]
+                if top_level in OS_MODULES:
+                    invalid.append(name)
+                elif top_level not in __import__("sys").stdlib_module_names:
+                    invalid.append(name)
     return invalid
 
 
@@ -49,6 +54,11 @@ def test_core_dependency_direction() -> None:
         "from ..adapters import mqtt",
         "import paho.mqtt.client",
         "from ha_teams_status import __main__",
+        "import ctypes",
+        "import os",
+        "import platform",
+        "import subprocess",
+        "import winreg",
     ],
 )
 def test_boundary_guard_rejects_outward_imports(source: str) -> None:

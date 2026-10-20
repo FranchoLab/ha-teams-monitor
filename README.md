@@ -86,14 +86,27 @@ the domain and its own modules. Adapters depend inward on ports and domain types
 Only the composition root chooses concrete connectors. Core code must not import
 OS-specific libraries, MQTT clients, or Home Assistant payload formats.
 
-The initial packages intentionally contain no speculative detector contracts or
-placeholder adapters. Add `MeetingDetector` and `MeetingStatusPublisher` ports
-with their first validated use cases.
+The domain now defines OS-neutral meeting observations, and the application owns
+the `MeetingDetector` port and observation use case. The CLI does not yet compose
+the detector, and MQTT/Home Assistant publishing remains separate work.
+
+The macOS Teams detector reads public IOKit power assertions. Its native matrix
+was recorded on Teams build `26276.505.5234.9924` and macOS `27.0.1 (26A434)`:
+idle, pre-join, ringing, and after leaving produced no Teams-owned assertions;
+joined and muted calls produced `NoDisplaySleepAssertion` and
+`NoIdleSleepAssertion`. The run used a non-root account (UID 501).
+
+To repeat the API-backed check after a Teams or macOS update, run
+`python3 scripts/macos_teams_api_diagnostic.py` as a standard user, without
+`sudo` or Full Disk Access, in each of these states: idle, pre-join, ringing,
+joined, muted, and after leaving. Record the exact build and assertion output.
+The diagnostic prints only the Teams build and assertion type names. A complete
+known assertion pair enables best-effort joined detection on a newer build; an
+unknown build without the pair remains indeterminate until its matrix is
+validated.
 
 Future adapters:
 
-- **macOS:** validate active Teams-specific power assertions, including pre-join,
-  ringing, joined calls, muted audio/video, and leaving.
 - **Windows:** establish an accurate standard-user mechanism for current Teams.
   Do not assume classic Teams logs remain valid.
 - **MQTT:** encode discovery, state, availability, expiry, and reconnect behavior;
