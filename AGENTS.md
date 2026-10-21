@@ -1,21 +1,49 @@
 # Project guidance
 
-- Read `README.md` and `openspec/config.yaml` before changing architecture.
-- Use the pinned OpenSpec workflow for proposed behavior changes. Keep proposed
-  functionality distinct from implemented, verified capabilities.
-- Python 3.12, uv, pytest, Ruff, strict mypy. Restore with `uv sync --frozen`
-  and `npm ci`; update locks only intentionally.
-- Hexagonal dependency direction: domain <- application <- adapters.
-  The CLI composes dependencies. Keep OS APIs, MQTT libraries, and Home Assistant
-  serialization out of the core; do not add a DI framework or plugin system.
-- macOS and Windows need separately validated detection connectors. Linux is a
-  development/test environment, not a supported live monitoring platform.
-- Never equate errors, stale observations, or unsupported detection with Off.
-  Never substitute calendar presence or microphone usage for actual joined calls.
-- Use fixtures/fake ports for portable tests; report native/live checks separately.
-  Do not claim Windows compatibility from tests run only inside Linux.
+## Change workflow
+
+- Before architecture changes, read [README.md](README.md) for project context
+  and [openspec/config.yaml](openspec/config.yaml) for proposal constraints.
+- For behavior changes, use the pinned OpenSpec workflow. Distinguish proposed
+  functionality from implemented, verified capabilities.
+- Write short Conventional Commit messages: `type: description`, no scope or body.
+
+## Tooling
+
+- Use [mise.toml](mise.toml) as the version authority for Python, Node.js, and uv.
+  Provision with `mise install`; run commands through `mise exec -- <command>`
+  rather than global tools.
+- Restore dependencies with `mise exec -- uv sync --frozen` and
+  `mise exec -- npm ci`. Change locks and tool versions only intentionally.
+
+## Architecture
+
+- Follow hexagonal dependencies: domain <- application <- adapters.
+  Compose dependencies in the CLI, without a DI framework or plugin system.
+- Keep OS APIs, MQTT libraries, and Home Assistant serialization in adapters,
+  outside the core.
+
+## Detection and safety
+
+- Validate macOS and Windows connectors separately. Linux supports development
+  and tests only, not live monitoring.
+- Preserve errors, stale observations, and unsupported detection as distinct
+  from Off. Detect actual joined calls; calendar presence and microphone usage
+  are not substitutes.
+- Use fixtures and fake ports for portable tests. Report native/live checks
+  separately; Linux tests do not establish Windows compatibility.
 - Keep secrets and meeting details out of source, logs, fixtures, and specs.
-  Do not add broad OS permissions or production broker access to bootstrap.
-- Run `uv run --frozen ruff check .`, `uv run --frozen ruff format --check .`,
-  `uv run --frozen mypy`, `uv run --frozen pytest`, `uv build --no-sources`,
-  and `npm run spec:validate` for a foundation change.
+  Bootstrap without broad OS permissions or production broker access.
+
+## Foundation validation
+
+For foundation changes, run all checks below. Use pytest, Ruff, and strict mypy.
+
+```sh
+mise exec -- uv run --frozen ruff check .
+mise exec -- uv run --frozen ruff format --check .
+mise exec -- uv run --frozen mypy
+mise exec -- uv run --frozen pytest
+mise exec -- uv build --no-sources
+mise exec -- npm run spec:validate
+```
