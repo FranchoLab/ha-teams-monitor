@@ -6,8 +6,9 @@ implemented. Live detection is supported only by the validated macOS connector;
 Windows detection remains an unresolved feasibility gate, and Linux is for
 development and portable tests rather than live monitoring.
 
-No startup agent, Microsoft tenant consent, Home Assistant API token, or
-production broker credentials are included or required.
+A per-user macOS login agent is available for automatic startup; it is
+optional. Microsoft tenant consent, a Home Assistant API token, and production
+broker credentials are not included or required.
 
 ## Development in VS Code
 
@@ -91,6 +92,54 @@ uv run --frozen ha-teams-status --config ./monitor.conf
 Monitoring requires a valid configuration. `--help` and `--version` remain
 available without one. Detection failures and unsupported platforms are not
 reported as Off.
+
+### Optional macOS login agent
+
+First verify the monitor in the foreground with the config you intend the
+service to use:
+
+```text
+uv run --frozen ha-teams-status --config ./monitor.conf
+```
+
+Stop the foreground monitor with Ctrl-C. To install a per-user LaunchAgent that
+starts immediately, starts at later logins, and restarts after unexpected
+exits:
+
+```text
+uv sync --frozen --extra macos-service
+uv run --frozen ha-teams-status service install --config ./monitor.conf
+```
+
+Install and uninstall run as the current standard user; do not use `sudo`. The
+agent runs only in that user's logged-in macOS session. Its plist is
+`~/Library/LaunchAgents/com.ha-teams-status.monitor.plist`. Installation builds
+a standalone executable named `ha-teams-status` under
+`~/Library/Application Support/ha-teams-status/runtime`; Activity Monitor and
+process inspection can identify it by that name rather than as `python`. The
+LaunchAgent invokes this executable with the absolute config path. Its plist
+does not contain MQTT credentials. Keep the config at its existing location
+and restrict access to the user account as described above.
+
+Check or manually restart the registered job with:
+
+```text
+launchctl print gui/$(id -u)/com.ha-teams-status.monitor
+launchctl kickstart -k gui/$(id -u)/com.ha-teams-status.monitor
+```
+
+The agent writes standard output and errors to
+`~/Library/Logs/ha-teams-status/stdout.log` and
+`~/Library/Logs/ha-teams-status/stderr.log`. To stop and remove the job:
+
+```text
+uv run --frozen ha-teams-status service uninstall
+```
+
+Uninstall removes the generated executable but keeps the config, logs, and
+retained Home Assistant MQTT discovery. Reinstall the agent after updating the
+application to rebuild the executable; its configuration path remains
+absolute.
 
 ## Home Assistant MQTT setup
 

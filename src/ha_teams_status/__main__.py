@@ -1,15 +1,22 @@
 """CLI entry point and future composition root."""
 
 import argparse
+import signal
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
-from time import sleep
+from threading import Event
+from types import FrameType
 from typing import Protocol
 
 from .adapters.configuration import ConfigurationError, MonitorConfig, load_config
 from .adapters.home_assistant_mqtt import create_publisher
+from .adapters.macos_login_agent import (
+    LaunchAgentError,
+    MacOSLoginAgent,
+    require_macos,
+)
 from .adapters.macos_teams import MacOSTeamsDetector
 from .application.monitor import (
     MeetingDetector,
@@ -37,7 +44,7 @@ def run_monitoring(
     detector: MeetingDetector | None = None,
     publisher: MonitoringPublisher | None = None,
     clock: Callable[[], datetime] = _utc_now,
-    wait: Callable[[float], None] = sleep,
+    wait: Callable[[float], None] | None = None,
 ) -> None:
     selected_detector = detector or MacOSTeamsDetector(clock=clock)
     selected_publisher = publisher or create_publisher(config)
@@ -50,14 +57,24 @@ def run_monitoring(
         publisher=selected_publisher,
         clock=clock,
     )
-    selected_publisher.start()
+    stop_requested = Event()
+
+    def request_shutdown(_signum: int, _frame: FrameType | None) -> None:
+        stop_requested.set()
+
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, request_shutdown)
     try:
-        while True:
+        selected_publisher.start()
+        while not stop_requested.is_set():
             monitor.execute()
-            wait(config.monitor.poll_interval_seconds)
+            if wait is None:
+                stop_requested.wait(config.monitor.poll_interval_seconds)
+            else:
+                wait(config.monitor.poll_interval_seconds)
     except KeyboardInterrupt:
         pass
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
         selected_publisher.stop()
 
 
@@ -67,8 +84,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Monitor Teams meeting state and publish it to Home Assistant over MQTT.",
     )
     parser.add_argument("--version", action="version", version=version("ha-teams-status"))
-    parser.add_argument("--config", type=Path, required=True, help="path to the monitor .conf file")
+    parser.add_argument("--config", type=Path, help="path to the monitor .conf file")
+    commands = parser.add_subparsers(dest="command")
+    service_parser = commands.add_parser("service", help="manage the macOS login agent")
+    service_commands = service_parser.add_subparsers(
+        dest="service_action",
+        required=True,
+    )
+    install_parser = service_commands.add_parser(
+        "install",
+        help="install and start the per-user macOS login agent",
+    )
+    install_parser.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        dest="service_config",
+        help="path to the monitor .conf file",
+    )
+    service_commands.add_parser("uninstall", help="stop and remove the macOS login agent")
     args = parser.parse_args(argv)
+
+    if args.command == "service":
+        try:
+            require_macos()
+        except LaunchAgentError as error:
+            parser.error(str(error))
+
+        if args.service_action == "install":
+            try:
+                load_config(args.service_config)
+            except ConfigurationError as error:
+                parser.error(str(error))
+            try:
+                MacOSLoginAgent().install(args.service_config)
+            except LaunchAgentError as error:
+                parser.error(str(error))
+            print("Installed and started the macOS login agent.")
+        else:
+            try:
+                MacOSLoginAgent().uninstall()
+            except LaunchAgentError as error:
+                parser.error(str(error))
+            print("Uninstalled the macOS login agent.")
+        return 0
+
+    if args.config is None:
+        parser.error("the following arguments are required: --config")
     try:
         config = load_config(args.config)
     except ConfigurationError as error:
