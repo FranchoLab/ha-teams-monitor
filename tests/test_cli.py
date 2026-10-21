@@ -12,6 +12,7 @@ import pytest
 import ha_teams_status.__main__ as cli
 from ha_teams_status.__main__ import main, run_monitoring
 from ha_teams_status.adapters.configuration import MonitorConfig, MonitorSettings, MqttSettings
+from ha_teams_status.adapters.windows_teams import WindowsTeamsDetector
 from ha_teams_status.application.monitor import DetectionError
 from ha_teams_status.domain.observation import (
     MeetingObservation,
@@ -32,6 +33,14 @@ class FakeDetector:
             raise self.error
         assert self.observation is not None
         return self.observation
+
+
+@dataclass
+class CloseableFakeDetector(FakeDetector):
+    closed: bool = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
@@ -245,6 +254,35 @@ def test_composition_publishes_unsupported_platform_as_indeterminate(
     assert len(publisher.observations) == 1
     assert publisher.observations[0].state is ObservationState.INDETERMINATE
     assert publisher.observations[0].reason is ObservationReason.UNSUPPORTED_PLATFORM
+
+
+def test_default_detector_selects_windows_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    detector = cli._default_detector(clock=lambda: NOW)
+
+    assert isinstance(detector, WindowsTeamsDetector)
+    detector.close()
+
+
+def test_monitoring_closes_managed_detector_and_stops_publisher() -> None:
+    detector = CloseableFakeDetector(
+        observation=MeetingObservation(ObservationState.NOT_JOINED, NOW)
+    )
+    publisher = FakePublisher()
+
+    run_monitoring(
+        _config(),
+        detector=detector,
+        publisher=publisher,
+        clock=lambda: NOW,
+        wait=_stop_after_poll,
+    )
+
+    assert detector.closed
+    assert publisher.stopped
 
 
 def test_sigterm_stops_polling_and_stops_publisher() -> None:

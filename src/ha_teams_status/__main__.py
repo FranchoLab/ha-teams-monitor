@@ -2,6 +2,7 @@
 
 import argparse
 import signal
+import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
@@ -18,6 +19,7 @@ from .adapters.macos_login_agent import (
     require_macos,
 )
 from .adapters.macos_teams import MacOSTeamsDetector
+from .adapters.windows_teams import WindowsTeamsDetector
 from .application.monitor import (
     MeetingDetector,
     MonitorMeeting,
@@ -38,6 +40,12 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _default_detector(clock: Callable[[], datetime]) -> MeetingDetector:
+    if sys.platform == "win32":
+        return WindowsTeamsDetector(clock=clock)
+    return MacOSTeamsDetector(clock=clock)
+
+
 def run_monitoring(
     config: MonitorConfig,
     *,
@@ -46,7 +54,7 @@ def run_monitoring(
     clock: Callable[[], datetime] = _utc_now,
     wait: Callable[[float], None] | None = None,
 ) -> None:
-    selected_detector = detector or MacOSTeamsDetector(clock=clock)
+    selected_detector = detector if detector is not None else _default_detector(clock)
     selected_publisher = publisher or create_publisher(config)
     monitor = MonitorMeeting(
         observe=ObserveMeeting(
@@ -74,8 +82,15 @@ def run_monitoring(
     except KeyboardInterrupt:
         pass
     finally:
-        signal.signal(signal.SIGTERM, previous_sigterm_handler)
-        selected_publisher.stop()
+        try:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        finally:
+            try:
+                close_detector = getattr(selected_detector, "close", None)
+                if callable(close_detector):
+                    close_detector()
+            finally:
+                selected_publisher.stop()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

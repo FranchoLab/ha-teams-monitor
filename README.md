@@ -2,9 +2,11 @@
 
 Standalone monitor for publishing a Teams meeting binary sensor to Home
 Assistant over MQTT. The monitor, configuration loader, and MQTT connector are
-implemented. Live detection is supported only by the validated macOS connector;
-Windows detection remains an unresolved feasibility gate, and Linux is for
-development and portable tests rather than live monitoring.
+implemented. Live detection is validated on macOS. A Windows connector for the
+New Teams Third-Party API is implemented but has not yet been verified on a
+native Windows host; do not treat Windows live detection as validated support
+until its native state matrix passes. Linux is for development and portable
+tests rather than live monitoring.
 
 A per-user macOS login agent is available for automatic startup; it is
 optional. Microsoft tenant consent, a Home Assistant API token, and production
@@ -92,6 +94,28 @@ uv run --frozen ha-teams-status --config ./monitor.conf
 Monitoring requires a valid configuration. `--help` and `--version` remain
 available without one. Detection failures and unsupported platforms are not
 reported as Off.
+
+### Windows Teams detection (not yet natively validated)
+
+The Windows connector targets the New Microsoft Teams client and its local
+Third-Party API. Run the monitor as the same standard Windows user who runs
+Teams, and enable the **Third-Party API** in Teams using the
+[Microsoft setup guidance](https://support.microsoft.com/en-us/office/connect-to-third-party-devices-in-microsoft-teams-aabca9f2-47bb-407f-9f9b-81a104a883d6).
+If Teams asks to authorize the monitor, approve it in Teams. The monitor
+connects to the local WebSocket API; it does not use a cloud service or require
+an API token in `monitor.conf`.
+
+The connector currently uses protocol version 2.0.0 and reads only the
+`isInMeeting` value from local meeting updates. An unavailable API, pending
+authorization, malformed update, or lost connection is reported as unknown or
+unavailable, never as not in a call.
+
+This implementation has only portable fake-backed tests so far. No native
+Windows state matrix has been run; Windows compatibility is therefore
+unverified. Before relying on it, verify authorization and pre-join, ringing,
+joined, muted, left, disconnect, and recovery behavior on Windows under a
+standard user account. Record the Teams build and results before describing
+Windows live detection as validated support.
 
 ### Optional macOS login agent
 
@@ -193,7 +217,7 @@ Do not replace frozen restores with implicit updates.
 src/ha_teams_status/
   domain/         # Meeting concepts; no infrastructure imports
   application/    # Use cases and application-owned ports
-  adapters/       # macOS detection, MQTT configuration and Home Assistant publisher
+  adapters/       # macOS/Windows detection, MQTT configuration and publisher
   __main__.py     # CLI and composition root
 tests/            # CLI smoke tests and import-boundary checks
 openspec/         # Requirements and proposed changes
@@ -205,9 +229,9 @@ Only the composition root chooses concrete connectors. Core code must not import
 OS-specific libraries, MQTT clients, or Home Assistant payload formats.
 
 The domain defines OS-neutral meeting observations. The application owns the
-detector and publisher ports; the CLI composes them with the macOS detector and
-Home Assistant MQTT adapter. MQTT and Home Assistant payload details stay in
-the adapter layer.
+detector and publisher ports; the CLI composes them with the macOS or Windows
+detector and Home Assistant MQTT adapter. MQTT and Home Assistant payload
+details stay in the adapter layer.
 
 The macOS Teams detector reads public IOKit power assertions. Its native matrix
 was recorded on Teams build `26276.505.5234.9924` and macOS `27.0.1 (26A434)`:
@@ -226,8 +250,9 @@ validated.
 
 Platform support and runtime behavior:
 
-- **Windows:** establish an accurate standard-user mechanism for current Teams.
-  Do not assume classic Teams logs remain valid.
+- **Windows:** the connector uses the New Teams local Third-Party API, but
+  native validation is still outstanding. Do not assume classic Teams logs
+  remain valid or claim live support from portable tests alone.
 - **MQTT:** discovery, state, availability, retained Last Will, heartbeat, and
   reconnect handling are implemented; the adapter does not depend on detector
   internals.
