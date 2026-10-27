@@ -17,6 +17,7 @@ class ObservationReason(StrEnum):
     SIGNAL_UNAVAILABLE = "signal_unavailable"
     SIGNAL_INCONCLUSIVE = "signal_inconclusive"
     STALE = "stale"
+    JOINED_DURATION_EXCEEDED = "joined_duration_exceeded"
 
 
 @dataclass(frozen=True, slots=True)

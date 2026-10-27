@@ -1,3 +1,4 @@
+import logging
 import os
 import signal
 import subprocess
@@ -316,3 +317,42 @@ def test_composition_publishes_detector_failure_as_indeterminate() -> None:
 
     assert publisher.observations[0].state is ObservationState.INDETERMINATE
     assert publisher.observations[0].reason is ObservationReason.SIGNAL_UNAVAILABLE
+
+
+def test_slow_monitor_iteration_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monotonic_values = iter([100.0, 106.0])
+    monkeypatch.setattr(cli, "monotonic", lambda: next(monotonic_values))
+    caplog.set_level(logging.WARNING, logger="ha_teams_status.__main__")
+    publisher = FakePublisher()
+
+    run_monitoring(
+        _config(),
+        detector=FakeDetector(observation=MeetingObservation(ObservationState.NOT_JOINED, NOW)),
+        publisher=publisher,
+        clock=lambda: NOW,
+        wait=_stop_after_poll,
+    )
+
+    assert "Monitoring iteration exceeded poll interval" in caplog.text
+    assert "6.000 seconds" in caplog.text
+
+
+def test_debug_option_configures_verbose_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = tmp_path / "monitor.conf"
+    _write_valid_config(config_file)
+    logging_options: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        logging,
+        "basicConfig",
+        lambda **kwargs: logging_options.append(kwargs),
+    )
+    monkeypatch.setattr(cli, "run_monitoring", lambda _config: None)
+
+    assert main(["--debug", "--config", str(config_file)]) == 0
+    assert logging_options[0]["level"] == logging.DEBUG

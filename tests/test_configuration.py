@@ -33,7 +33,44 @@ def test_load_config_preserves_literal_password_characters(tmp_path: Path) -> No
     assert "p%#;=word" not in repr(config)
     assert config.mqtt.port == 1883
     assert config.monitor.poll_interval_seconds == 5
+    assert config.monitor.max_joined_duration_seconds == 8 * 60 * 60
     assert config.sensor_name == "Teams meeting"
+
+
+def test_load_config_reads_custom_maximum_joined_duration(tmp_path: Path) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG + "max_joined_duration_seconds = 1200\n",
+        encoding="utf-8",
+    )
+
+    assert load_config(config_file).monitor.max_joined_duration_seconds == 1200
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_load_config_rejects_nonpositive_maximum_joined_duration(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG + f"max_joined_duration_seconds = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="must be positive"):
+        load_config(config_file)
+
+
+def test_load_config_rejects_noninteger_maximum_joined_duration(tmp_path: Path) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG + "max_joined_duration_seconds = invalid\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="must be an integer"):
+        load_config(config_file)
 
 
 def test_load_config_reads_custom_sensor_name(tmp_path: Path) -> None:
@@ -99,6 +136,7 @@ def test_readme_config_example_parses_and_uses_placeholders(tmp_path: Path) -> N
     assert config.mqtt.username == "YOUR_MQTT_USERNAME"
     assert config.mqtt.password == "REPLACE_WITH_MQTT_PASSWORD"
     assert config.sensor_name == "Teams meeting"
+    assert config.monitor.max_joined_duration_seconds == 8 * 60 * 60
 
 
 def test_readme_acl_matches_documented_config_topics(tmp_path: Path) -> None:

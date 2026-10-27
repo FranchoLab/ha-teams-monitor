@@ -1,5 +1,6 @@
 """Microsoft Teams meeting detector for macOS."""
 
+import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,8 +19,14 @@ from .macos_power_assertions import (
     TeamsPowerAssertions,
 )
 
-SUPPORTED_TEAMS_BUILDS = frozenset({"26276.505.5234.9924"})
+VALIDATED_TEAMS_BUILDS = frozenset(
+    {
+        "26276.505.5234.9924",
+        "26289.203.5259.2574",
+    }
+)
 _JOINED_ASSERTIONS = frozenset({"NoDisplaySleepAssertion", "NoIdleSleepAssertion"})
+_LOGGER = logging.getLogger(__name__)
 
 
 class PowerAssertionSource(Protocol):
@@ -44,14 +51,18 @@ class MacOSTeamsDetector(MeetingDetector):
         try:
             assertions = source.read()
         except PowerAssertionReadError as error:
+            _LOGGER.warning(
+                "Unable to read macOS Teams power assertions (%s).",
+                type(error).__name__,
+            )
             raise DetectionError("Unable to read macOS Teams power assertions.") from error
 
         if not assertions.process_found:
             return MeetingObservation(ObservationState.NOT_JOINED, observed_at)
+        if assertions.version not in VALIDATED_TEAMS_BUILDS:
+            return self._indeterminate(observed_at, ObservationReason.UNSUPPORTED_CLIENT)
         if _JOINED_ASSERTIONS.issubset(assertions.assertion_types):
             return MeetingObservation(ObservationState.JOINED, observed_at)
-        if assertions.version not in SUPPORTED_TEAMS_BUILDS:
-            return self._indeterminate(observed_at, ObservationReason.UNSUPPORTED_CLIENT)
         if not assertions.assertion_types:
             return MeetingObservation(ObservationState.NOT_JOINED, observed_at)
         return self._indeterminate(observed_at, ObservationReason.SIGNAL_INCONCLUSIVE)

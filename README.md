@@ -2,11 +2,12 @@
 
 Standalone monitor for publishing a Teams meeting binary sensor to Home
 Assistant over MQTT. The monitor, configuration loader, and MQTT connector are
-implemented. Live detection is validated on macOS. A Windows connector for the
-New Teams Third-Party API is implemented but has not yet been verified on a
-native Windows host; do not treat Windows live detection as validated support
-until its native state matrix passes. Linux is for development and portable
-tests rather than live monitoring.
+implemented. Live detection has been validated for the macOS Teams build and
+state matrix documented below. A Windows connector for the New Teams
+Third-Party API is implemented but has not yet been verified on a native
+Windows host; do not treat Windows live detection as validated support until
+its native state matrix passes. Linux is for development and portable tests
+rather than live monitoring.
 
 A per-user macOS login agent is available for automatic startup; it is
 optional. Microsoft tenant consent, a Home Assistant API token, and production
@@ -70,10 +71,16 @@ poll_interval_seconds = 5
 observation_max_age_seconds = 15
 heartbeat_interval_seconds = 10
 availability_expiry_seconds = 30
+max_joined_duration_seconds = 28800
 
 [sensor]
 name = Teams meeting
 ```
+
+The monitor limits a continuous joined state to eight hours by default. After
+that limit it publishes `UNKNOWN`, not `OFF`, until detection confirms that the
+call has ended. Set `max_joined_duration_seconds` under `[monitor]` to tune the
+limit; it must be a positive integer.
 
 The configured name also determines Home Assistant's initial entity ID. For
 example, `name = Francho reunido` produces
@@ -94,6 +101,26 @@ uv run --frozen ha-teams-status --config ./monitor.conf
 Monitoring requires a valid configuration. `--help` and `--version` remain
 available without one. Detection failures and unsupported platforms are not
 reported as Off.
+
+The monitor writes state transitions and sanitized failure categories to
+standard error; LaunchAgent runs capture these in
+`~/Library/Logs/ha-teams-status/stderr.log`. For per-poll timing details when
+running in the foreground, add `--debug`:
+
+```text
+uv run --frozen ha-teams-status --debug --config ./monitor.conf
+```
+
+Logs do not include credentials, meeting titles, participants, or raw assertion
+output. For a suspected missed hangup, compare the sanitized macOS signal while
+joined and after leaving:
+
+```text
+mise exec -- uv run --frozen python scripts/macos_teams_api_diagnostic.py
+```
+
+It reports only the Teams build and assertion type names; do not collect or
+share raw system assertion output, which may contain meeting details.
 
 ### Windows Teams detection (not yet natively validated)
 
@@ -239,14 +266,23 @@ idle, pre-join, ringing, and after leaving produced no Teams-owned assertions;
 joined and muted calls produced `NoDisplaySleepAssertion` and
 `NoIdleSleepAssertion`. The run used a non-root account (UID 501).
 
-To repeat the API-backed check after a Teams or macOS update, run
-`python3 scripts/macos_teams_api_diagnostic.py` as a standard user, without
-`sudo` or Full Disk Access, in each of these states: idle, pre-join, ringing,
-joined, muted, and after leaving. Record the exact build and assertion output.
-The diagnostic prints only the Teams build and assertion type names. A complete
-known assertion pair enables best-effort joined detection on a newer build; an
-unknown build without the pair remains indeterminate until its matrix is
-validated.
+The diagnostic matrix supplied for Teams build `26289.203.5259.2574` reported
+no assertions while waiting to join, both assertions in a meeting, and no
+assertions after leaving. The detector accepts these two builds based on their
+observed state matrices; this does not establish compatibility for later
+builds.
+
+To repeat the check after a Teams or macOS update, run the
+`mise exec -- uv run --frozen python scripts/macos_teams_api_diagnostic.py`
+command as a standard user, without `sudo` or Full Disk Access, in each of
+these states: idle, pre-join, ringing, joined, muted, and after leaving. Record
+the exact build and assertion type names; the diagnostic prints only those
+values. The detector reports joined only for builds whose signal has been
+validated to distinguish an active call from idle, pre-join, and after-hangup
+states. An unvalidated build reports UNKNOWN even when the complete assertion
+pair is present. No version-independent, officially documented local macOS
+call-state API was found, so a future Teams build may remain UNKNOWN during a
+real call until its state matrix is validated.
 
 Platform support and runtime behavior:
 

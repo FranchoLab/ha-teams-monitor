@@ -30,11 +30,15 @@ The detector SHALL represent unsupported, unavailable, stale, or inconclusive ob
 
 #### Scenario: New Teams build retains the known joined-call signature
 - **WHEN** the installed Teams build is not yet validated but the complete known joined-call assertion signature is present
-- **THEN** the detector reports joined based on that signature
+- **THEN** the result is indeterminate with an unsupported-client or inconclusive reason; the signature alone is not sufficient to report joined
 
 #### Scenario: New Teams build has no known call signature
 - **WHEN** the installed Teams build is not yet validated and the known joined-call assertion signature is absent or incomplete
 - **THEN** the result is indeterminate with an unsupported-client or inconclusive reason and is not reported as not joined
+
+#### Scenario: Signal is not validated as discriminating for the installed build
+- **WHEN** the signal has not been validated to distinguish an active call from idle, pre-join, or post-call states for the installed Teams build
+- **THEN** the result is indeterminate and is not reported as joined or not joined
 
 #### Scenario: macOS observation fails
 - **WHEN** the detector cannot read or interpret the required macOS observation
@@ -54,3 +58,14 @@ The detector SHALL operate as the normal logged-in user without requiring elevat
 #### Scenario: Observation contains meeting details
 - **WHEN** the underlying macOS or Teams observation includes meeting-specific content
 - **THEN** the detector result excludes titles, participant identities, and meeting content
+
+### Requirement: Emit privacy-safe detector diagnostics
+The detector SHALL emit diagnostics for outcome changes and signal-read failures without exposing meeting details or credentials.
+
+#### Scenario: Detector outcome changes
+- **WHEN** a fresh observation changes between joined, not joined, or indeterminate
+- **THEN** diagnostics identify the observation state, bounded reason when present, and observation time without logging meeting content, titles, or participant identities
+
+#### Scenario: Signal read fails
+- **WHEN** the detector cannot read the macOS signal
+- **THEN** diagnostics record a sanitized failure category without raw operating-system output or meeting details

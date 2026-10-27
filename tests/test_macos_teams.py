@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,7 @@ from ha_teams_status.adapters.macos_power_assertions import (
     _bundle_version,
 )
 from ha_teams_status.adapters.macos_teams import (
-    SUPPORTED_TEAMS_BUILDS,
+    VALIDATED_TEAMS_BUILDS,
     MacOSTeamsDetector,
 )
 from ha_teams_status.application.monitor import DetectionError, ObserveMeeting
@@ -18,6 +19,8 @@ from ha_teams_status.domain.observation import ObservationReason, ObservationSta
 
 NOW = datetime(2026, 10, 19, 12, 0, tzinfo=UTC)
 SUPPORTED_BUILD = "26276.505.5234.9924"
+OBSERVED_BUILD = "26289.203.5259.2574"
+VALIDATED_BUILDS = (SUPPORTED_BUILD, OBSERVED_BUILD)
 JOINED_ASSERTIONS = frozenset({"NoDisplaySleepAssertion", "NoIdleSleepAssertion"})
 
 
@@ -40,21 +43,19 @@ def make_detector(
     return MacOSTeamsDetector(source=source, clock=lambda: NOW)
 
 
+@pytest.mark.parametrize("version", VALIDATED_BUILDS)
 @pytest.mark.parametrize(
     "assertion_types",
-    [
-        frozenset(),
-        frozenset({"NoDisplaySleepAssertion"}),
-        frozenset({"NoIdleSleepAssertion"}),
-    ],
+    [frozenset(), frozenset({"NoDisplaySleepAssertion"}), frozenset({"NoIdleSleepAssertion"})],
 )
 def test_detector_does_not_report_joined_without_both_assertions(
     monkeypatch: pytest.MonkeyPatch,
+    version: str,
     assertion_types: frozenset[str],
 ) -> None:
     detector = make_detector(
         monkeypatch,
-        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, SUPPORTED_BUILD, assertion_types)),
+        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, version, assertion_types)),
     )
 
     observation = detector.detect()
@@ -67,14 +68,14 @@ def test_detector_does_not_report_joined_without_both_assertions(
         assert observation.reason is ObservationReason.SIGNAL_INCONCLUSIVE
 
 
+@pytest.mark.parametrize("version", VALIDATED_BUILDS)
 def test_detector_reports_joined_only_for_validated_assertion_pair(
     monkeypatch: pytest.MonkeyPatch,
+    version: str,
 ) -> None:
     detector = make_detector(
         monkeypatch,
-        FakeAssertionSource(
-            snapshot=TeamsPowerAssertions(True, SUPPORTED_BUILD, JOINED_ASSERTIONS)
-        ),
+        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, version, JOINED_ASSERTIONS)),
     )
 
     observation = detector.detect()
@@ -83,7 +84,7 @@ def test_detector_reports_joined_only_for_validated_assertion_pair(
     assert observation.observed_at == NOW
 
 
-@pytest.mark.parametrize("version", [None, "unvalidated-build"])
+@pytest.mark.parametrize("version", [None, "unvalidated-build", "26300.0.0.0"])
 def test_detector_reports_unvalidated_client_without_signature_as_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     version: str | None,
@@ -99,8 +100,11 @@ def test_detector_reports_unvalidated_client_without_signature_as_indeterminate(
     assert observation.reason is ObservationReason.UNSUPPORTED_CLIENT
 
 
-@pytest.mark.parametrize("version", [None, "unvalidated-build"])
-def test_detector_uses_complete_signature_on_unvalidated_build(
+@pytest.mark.parametrize(
+    "version",
+    [None, "unvalidated-build", "26300.0.0.0"],
+)
+def test_detector_reports_complete_signature_on_unvalidated_build_as_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     version: str | None,
 ) -> None:
@@ -111,7 +115,8 @@ def test_detector_uses_complete_signature_on_unvalidated_build(
 
     observation = detector.detect()
 
-    assert observation.state is ObservationState.JOINED
+    assert observation.state is ObservationState.INDETERMINATE
+    assert observation.reason is ObservationReason.UNSUPPORTED_CLIENT
 
 
 def test_detector_reports_absent_teams_process_as_not_joined(
@@ -127,7 +132,9 @@ def test_detector_reports_absent_teams_process_as_not_joined(
 
 def test_detector_preserves_signal_read_failure_as_detection_error(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING, logger="ha_teams_status.adapters.macos_teams")
     detector = make_detector(
         monkeypatch,
         FakeAssertionSource(error=PowerAssertionReadError("native query failed")),
@@ -135,6 +142,8 @@ def test_detector_preserves_signal_read_failure_as_detection_error(
 
     with pytest.raises(DetectionError):
         detector.detect()
+    assert "PowerAssertionReadError" in caplog.text
+    assert "native query failed" not in caplog.text
 
 
 def test_detector_is_indeterminate_off_macos_without_reading_source(
@@ -203,5 +212,5 @@ def test_bundle_version_reads_only_application_version(tmp_path: Path) -> None:
             info_file,
         )
 
-    assert SUPPORTED_BUILD in SUPPORTED_TEAMS_BUILDS
+    assert set(VALIDATED_BUILDS) == VALIDATED_TEAMS_BUILDS
     assert _bundle_version(str(bundle / "Contents" / "MacOS" / "MSTeams")) == SUPPORTED_BUILD

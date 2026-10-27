@@ -1,6 +1,7 @@
 """Home Assistant MQTT discovery and meeting-state publisher."""
 
 import json
+import logging
 import re
 import ssl
 import unicodedata
@@ -13,6 +14,13 @@ from paho.mqtt.enums import CallbackAPIVersion
 
 from ..domain.observation import MeetingObservation, ObservationState
 from .configuration import MonitorConfig, MonitorSettings, MqttSettings
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class MqttPublishReceipt(Protocol):
+    @property
+    def rc(self) -> int: ...
 
 
 class MqttClient(Protocol):
@@ -53,11 +61,15 @@ class MqttClient(Protocol):
         *,
         qos: int,
         retain: bool,
-    ) -> object: ...
+    ) -> MqttPublishReceipt: ...
 
 
 class MqttConnectionError(Exception):
     """Raised when the broker connection cannot be started safely."""
+
+
+class MqttPublishError(Exception):
+    """Raised when an MQTT publish cannot be queued."""
 
 
 class HomeAssistantMqttPublisher:
@@ -156,11 +168,9 @@ class HomeAssistantMqttPublisher:
         if not self._started:
             return
         try:
-            receipt = self._client.publish(
+            receipt = self._publish(
                 self.availability_topic,
                 "offline",
-                qos=1,
-                retain=True,
             )
             wait_for_publish = getattr(receipt, "wait_for_publish", None)
             if callable(wait_for_publish):
@@ -186,7 +196,7 @@ class HomeAssistantMqttPublisher:
         while not self._heartbeat_stop.wait(self._monitor.heartbeat_interval_seconds):
             try:
                 self.heartbeat()
-            except Exception:
+            except MqttPublishError:
                 continue
 
     def _on_connect(
@@ -203,8 +213,33 @@ class HomeAssistantMqttPublisher:
         self._publish(self.availability_topic, "online")
         self._publish(self.state_topic, "UNKNOWN")
 
-    def _publish(self, topic: str, payload: str) -> None:
-        self._client.publish(topic, payload, qos=1, retain=True)
+    def _publish(self, topic: str, payload: str) -> MqttPublishReceipt:
+        topic_role = self._topic_role(topic)
+        try:
+            receipt = self._client.publish(topic, payload, qos=1, retain=True)
+        except Exception as error:
+            _LOGGER.error(
+                "MQTT publish failed for %s topic (%s).",
+                topic_role,
+                type(error).__name__,
+            )
+            raise MqttPublishError("MQTT publish could not be queued.") from None
+        if receipt.rc != mqtt_client.MQTT_ERR_SUCCESS:
+            _LOGGER.warning(
+                "MQTT publish rejected for %s topic (result_code=%s).",
+                topic_role,
+                receipt.rc,
+            )
+        return receipt
+
+    def _topic_role(self, topic: str) -> str:
+        if topic == self.discovery_topic:
+            return "discovery"
+        if topic == self.state_topic:
+            return "state"
+        if topic == self.availability_topic:
+            return "availability"
+        return "other"
 
 
 def create_publisher(config: MonitorConfig) -> HomeAssistantMqttPublisher:

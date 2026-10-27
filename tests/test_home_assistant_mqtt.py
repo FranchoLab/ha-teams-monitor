@@ -13,6 +13,7 @@ from ha_teams_status.adapters.configuration import MonitorSettings, MqttSettings
 from ha_teams_status.adapters.home_assistant_mqtt import (
     HomeAssistantMqttPublisher,
     MqttConnectionError,
+    MqttPublishError,
 )
 from ha_teams_status.domain.observation import (
     MeetingObservation,
@@ -37,6 +38,8 @@ class FakeMqttClient:
     reconnect_delays: tuple[int, int] | None = None
     connect_arguments: tuple[str, int, int] | None = None
     connection_error: Exception | None = None
+    publish_result: int = 0
+    publish_error: Exception | None = None
     tls_options: tuple[str | None, ssl.VerifyMode | None, int | None] | None = None
     events: list[str] | None = None
     receipts: list[FakePublishReceipt] | None = None
@@ -94,8 +97,10 @@ class FakeMqttClient:
         return self.connected
 
     def publish(self, topic: str, payload: str, *, qos: int, retain: bool) -> FakePublishReceipt:
+        if self.publish_error is not None:
+            raise self.publish_error
         self.messages.append(PublishedMessage(topic, payload, qos, retain))
-        receipt = FakePublishReceipt(self.events)
+        receipt = FakePublishReceipt(self.events, self.publish_result)
         assert self.receipts is not None
         self.receipts.append(receipt)
         return receipt
@@ -114,6 +119,7 @@ class FakeMqttClient:
 @dataclass
 class FakePublishReceipt:
     events: list[str] | None
+    rc: int = 0
 
     def wait_for_publish(self, timeout: float | None = None) -> None:
         assert self.events is not None
@@ -239,6 +245,50 @@ def test_observation_state_is_retained_at_configured_topic(
     publisher.publish(observation)
 
     assert client.messages == [PublishedMessage("monitor/teams/state", payload, 1, True)]
+
+
+def test_rejected_publish_logs_topic_role_without_payload_or_credentials(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="ha_teams_status.adapters.home_assistant_mqtt")
+    client = FakeMqttClient(messages=[], publish_result=4)
+    publisher = HomeAssistantMqttPublisher(client, mqtt_settings, monitor_settings)
+    observation = MeetingObservation(
+        state=ObservationState.JOINED,
+        observed_at=datetime(2026, 10, 20, 12, 0, tzinfo=UTC),
+    )
+
+    publisher.publish(observation)
+
+    assert "rejected for state topic" in caplog.text
+    assert "result_code=4" in caplog.text
+    assert "ON" not in caplog.text
+    assert "placeholder" not in caplog.text
+
+
+def test_publish_exception_is_logged_safely_and_raised(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("ERROR", logger="ha_teams_status.adapters.home_assistant_mqtt")
+    client = FakeMqttClient(
+        messages=[],
+        publish_error=RuntimeError("private mqtt payload detail"),
+    )
+    publisher = HomeAssistantMqttPublisher(client, mqtt_settings, monitor_settings)
+    observation = MeetingObservation(
+        state=ObservationState.JOINED,
+        observed_at=datetime(2026, 10, 20, 12, 0, tzinfo=UTC),
+    )
+
+    with pytest.raises(MqttPublishError, match="could not be queued"):
+        publisher.publish(observation)
+
+    assert "RuntimeError" in caplog.text
+    assert "private mqtt payload detail" not in caplog.text
 
 
 def test_start_and_stop_publish_availability_with_last_will(

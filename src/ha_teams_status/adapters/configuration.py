@@ -9,6 +9,9 @@ class ConfigurationError(Exception):
     """Raised when monitor configuration cannot be loaded safely."""
 
 
+_DEFAULT_MAX_JOINED_DURATION_SECONDS = 8 * 60 * 60
+
+
 @dataclass(frozen=True, slots=True)
 class MqttSettings:
     host: str
@@ -27,6 +30,7 @@ class MonitorSettings:
     observation_max_age_seconds: int
     heartbeat_interval_seconds: int
     availability_expiry_seconds: int
+    max_joined_duration_seconds: int = _DEFAULT_MAX_JOINED_DURATION_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +64,11 @@ def load_config(path: str | Path) -> MonitorConfig:
         observation_max_age_seconds=_integer(parser, "monitor", "observation_max_age_seconds"),
         heartbeat_interval_seconds=_integer(parser, "monitor", "heartbeat_interval_seconds"),
         availability_expiry_seconds=_integer(parser, "monitor", "availability_expiry_seconds"),
+        max_joined_duration_seconds=(
+            _integer(parser, "monitor", "max_joined_duration_seconds")
+            if parser.has_option("monitor", "max_joined_duration_seconds")
+            else _DEFAULT_MAX_JOINED_DURATION_SECONDS
+        ),
     )
     sensor_name = parser.get("sensor", "name", fallback="Teams meeting").strip()
     if not sensor_name:
@@ -78,6 +87,7 @@ def load_config(path: str | Path) -> MonitorConfig:
             monitor.observation_max_age_seconds,
             monitor.heartbeat_interval_seconds,
             monitor.availability_expiry_seconds,
+            monitor.max_joined_duration_seconds,
         )
     ):
         raise ConfigurationError("monitor intervals must be positive integers")

@@ -1,6 +1,7 @@
 """CLI entry point and future composition root."""
 
 import argparse
+import logging
 import signal
 import sys
 from collections.abc import Callable, Sequence
@@ -8,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from threading import Event
+from time import monotonic
 from types import FrameType
 from typing import Protocol
 
@@ -26,6 +28,8 @@ from .application.monitor import (
     ObserveMeeting,
 )
 from .domain.observation import MeetingObservation
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class MonitoringPublisher(Protocol):
@@ -64,6 +68,9 @@ def run_monitoring(
         ),
         publisher=selected_publisher,
         clock=clock,
+        max_joined_duration=timedelta(
+            seconds=config.monitor.max_joined_duration_seconds,
+        ),
     )
     stop_requested = Event()
 
@@ -74,7 +81,23 @@ def run_monitoring(
     try:
         selected_publisher.start()
         while not stop_requested.is_set():
-            monitor.execute()
+            iteration_started = monotonic()
+            try:
+                monitor.execute()
+            finally:
+                iteration_duration = monotonic() - iteration_started
+                if iteration_duration > config.monitor.poll_interval_seconds:
+                    _LOGGER.warning(
+                        "Monitoring iteration exceeded poll interval: %.3f seconds "
+                        "for a %d second interval.",
+                        iteration_duration,
+                        config.monitor.poll_interval_seconds,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Monitoring iteration completed in %.3f seconds.",
+                        iteration_duration,
+                    )
             if wait is None:
                 stop_requested.wait(config.monitor.poll_interval_seconds)
             else:
@@ -100,6 +123,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=version("ha-teams-status"))
     parser.add_argument("--config", type=Path, help="path to the monitor .conf file")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="enable per-iteration monitoring diagnostics",
+    )
     commands = parser.add_subparsers(dest="command")
     service_parser = commands.add_parser("service", help="manage the macOS login agent")
     service_commands = service_parser.add_subparsers(
@@ -150,6 +178,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = load_config(args.config)
     except ConfigurationError as error:
         parser.error(str(error))
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     run_monitoring(config)
     return 0
 
