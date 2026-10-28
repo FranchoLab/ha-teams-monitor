@@ -144,6 +144,20 @@ joined, muted, left, disconnect, and recovery behavior on Windows under a
 standard user account. Record the Teams build and results before describing
 Windows live detection as validated support.
 
+Where company policy disables the Third-Party API, the proposed replacement
+reads the current user's New Teams logs instead. Its state markers are not yet
+validated. To gather evidence, run this read-only probe on Windows as the
+standard user who runs Teams, then label each state as you go through idle,
+pre-join, joined, muted, left, and ringing:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows_teams_log_discovery.ps1
+```
+
+It prints and saves (under `%TEMP%`) only file-name and line shapes, encodings,
+file rotation events, and filtered marker candidates per labelled state. It never
+prints or saves raw log lines. Review the report before sharing it.
+
 ### Optional macOS login agent
 
 First verify the monitor in the foreground with the config you intend the
