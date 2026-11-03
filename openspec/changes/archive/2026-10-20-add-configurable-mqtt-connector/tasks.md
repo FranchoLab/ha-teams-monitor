@@ -6,7 +6,7 @@
 - [x] 1.2 Add the explicit `--config <path>` monitoring option while preserving `--help` and `--version`; verify CLI tests show monitoring fails before connecting when configuration is absent or invalid.
 - [x] 1.3 Document a placeholder-only `.conf` example, file-permission guidance, and the exact startup command in README; verify the documented example parses and contains no usable credentials.
 - [x] 1.4 Add optional `[sensor] name` configuration with the `Teams meeting` default; use it in Home Assistant discovery and verify custom/default names without changing the stable unique ID or topics.
-- [x] 1.5 Derive Home Assistant `default_entity_id` from `[sensor] name` with the `teams_status` prefix; test normalization (including `Francho reunido`) and document that existing registry entities may need a one-time rename.
+- [x] 1.5 Derive Home Assistant `default_entity_id` from `[sensor] name` with the `teams_status` prefix; test normalization (including `Desktop meeting`) and document that existing registry entities may need a one-time rename.
 
 ## 2. Application Publishing Flow
 

@@ -32,9 +32,38 @@ def test_load_config_preserves_literal_password_characters(tmp_path: Path) -> No
     assert config.mqtt.password == "p%#;=word"
     assert "p%#;=word" not in repr(config)
     assert config.mqtt.port == 1883
+    assert config.mqtt.instance_id == "ha_teams_status"
     assert config.monitor.poll_interval_seconds == 5
     assert config.monitor.max_joined_duration_seconds == 8 * 60 * 60
     assert config.sensor_name == "Teams meeting"
+
+
+@pytest.mark.parametrize("instance_id", ["ha_teams_status_laptop", "desktop-1", "a", "1" * 48])
+def test_load_config_reads_instance_id(tmp_path: Path, instance_id: str) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", f"[mqtt]\ninstance_id = {instance_id}"),
+        encoding="utf-8",
+    )
+
+    assert load_config(config_file).mqtt.instance_id == instance_id
+
+
+@pytest.mark.parametrize(
+    "instance_id",
+    ["", "   ", "A", "private/identity", "with spaces", "+", "#", "café", "_mac", "-mac", "a" * 49],
+)
+def test_load_config_rejects_invalid_instance_id(tmp_path: Path, instance_id: str) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", f"[mqtt]\ninstance_id = {instance_id}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="mqtt instance_id must be") as error:
+        load_config(config_file)
+
+    assert "private/identity" not in str(error.value)
 
 
 def test_load_config_reads_custom_maximum_joined_duration(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ ha-teams-status = "ha_teams_status.__main__:main"
 
 [dependency-groups]
 dev = [
+    "jinja2>=3.1,<4",
     "mypy>=1.15,<2",
     "pre-commit>=4.2,<5",
     "pytest>=8.3,<10",

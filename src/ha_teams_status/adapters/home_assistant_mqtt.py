@@ -100,7 +100,9 @@ class HomeAssistantMqttPublisher:
 
     @property
     def discovery_topic(self) -> str:
-        return f"{self._mqtt.discovery_prefix}/binary_sensor/ha_teams_status/meeting/config"
+        return (
+            f"{self._mqtt.discovery_prefix}/binary_sensor/{self._mqtt.instance_id}/meeting/config"
+        )
 
     @property
     def state_topic(self) -> str:
@@ -127,7 +129,7 @@ class HomeAssistantMqttPublisher:
                 }
             ],
             "device": {
-                "identifiers": ["ha_teams_status"],
+                "identifiers": [self._mqtt.instance_id],
                 "manufacturer": "Local monitor",
                 "model": "Teams MQTT sensor",
                 "name": "teams status",
@@ -139,7 +141,8 @@ class HomeAssistantMqttPublisher:
             "payload_off": "OFF",
             "payload_on": "ON",
             "state_topic": self.state_topic,
-            "unique_id": "ha_teams_status_teams_meeting",
+            "unique_id": f"{self._mqtt.instance_id}_teams_meeting",
+            "value_template": "{{ 'None' if value == 'UNKNOWN' else value }}",
         }
         self._publish(self.discovery_topic, json.dumps(payload, sort_keys=True))
 
@@ -245,7 +248,7 @@ class HomeAssistantMqttPublisher:
 def create_publisher(config: MonitorConfig) -> HomeAssistantMqttPublisher:
     client = mqtt_client.Client(
         callback_api_version=CallbackAPIVersion.VERSION2,
-        client_id="ha_teams_status",
+        client_id=config.mqtt.instance_id,
     )
     return HomeAssistantMqttPublisher(
         client,
