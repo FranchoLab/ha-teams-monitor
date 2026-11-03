@@ -3,17 +3,20 @@ from __future__ import annotations
 import json
 import ssl
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from jinja2 import Environment
 
-from ha_teams_status.adapters.configuration import MonitorSettings, MqttSettings
+from ha_teams_status.adapters.configuration import MonitorConfig, MonitorSettings, MqttSettings
 from ha_teams_status.adapters.home_assistant_mqtt import (
     HomeAssistantMqttPublisher,
     MqttConnectionError,
     MqttPublishError,
+    create_publisher,
 )
 from ha_teams_status.domain.observation import (
     MeetingObservation,
@@ -170,6 +173,7 @@ def test_discovery_uses_stable_identity_and_configured_topics(
     assert message.qos == 1
     assert message.retain
     assert payload["unique_id"] == "ha_teams_status_teams_meeting"
+    assert payload["device"]["identifiers"] == ["ha_teams_status"]
     assert payload["name"] == "Teams meeting"
     assert payload["default_entity_id"] == "binary_sensor.teams_status_teams_meeting"
     assert payload["state_topic"] == "monitor/teams/state"
@@ -177,6 +181,81 @@ def test_discovery_uses_stable_identity_and_configured_topics(
     assert payload["payload_on"] == "ON"
     assert payload["payload_off"] == "OFF"
     assert payload["expire_after"] == 30
+
+
+@pytest.mark.parametrize("instance_id", ["ha_teams_status", "ha_teams_status_laptop"])
+def test_factory_uses_configured_mqtt_client_id(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+    instance_id: str,
+) -> None:
+    config = MonitorConfig(
+        mqtt=replace(mqtt_settings, instance_id=instance_id),
+        monitor=monitor_settings,
+    )
+    with patch("ha_teams_status.adapters.home_assistant_mqtt.mqtt_client.Client") as factory:
+        create_publisher(config)
+
+    assert factory.call_args.kwargs["client_id"] == instance_id
+
+
+def test_two_sources_have_independent_discovery_state_and_availability(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+) -> None:
+    clients = [FakeMqttClient(messages=[]), FakeMqttClient(messages=[])]
+    settings = [
+        mqtt_settings,
+        replace(
+            mqtt_settings,
+            instance_id="ha_teams_status_laptop",
+            topic_prefix="monitor/teams_laptop",
+        ),
+    ]
+    publishers = [
+        HomeAssistantMqttPublisher(client, source, monitor_settings)
+        for client, source in zip(clients, settings, strict=True)
+    ]
+    for publisher in publishers:
+        publisher.publish_discovery()
+    payloads = [json.loads(client.messages[0].payload) for client in clients]
+
+    assert publishers[0].discovery_topic != publishers[1].discovery_topic
+    assert publishers[1].discovery_topic == (
+        "ha/discovery/binary_sensor/ha_teams_status_laptop/meeting/config"
+    )
+    assert payloads[0]["unique_id"] != payloads[1]["unique_id"]
+    assert payloads[1]["unique_id"] == "ha_teams_status_laptop_teams_meeting"
+    assert payloads[0]["device"]["identifiers"] != payloads[1]["device"]["identifiers"]
+    assert payloads[1]["device"]["identifiers"] == ["ha_teams_status_laptop"]
+    assert publishers[0].state_topic != publishers[1].state_topic
+    assert publishers[0].availability_topic != publishers[1].availability_topic
+    assert payloads[1]["state_topic"] == "monitor/teams_laptop/state"
+    assert payloads[1]["availability"][0]["topic"] == "monitor/teams_laptop/availability"
+    assert clients[0].will != clients[1].will
+
+    for publisher, state in zip(
+        publishers, [ObservationState.JOINED, ObservationState.NOT_JOINED], strict=True
+    ):
+        publisher.publish(MeetingObservation(state=state, observed_at=datetime.now(UTC)))
+
+    assert clients[0].messages[-1] == PublishedMessage("monitor/teams/state", "ON", 1, True)
+    assert clients[1].messages[-1] == PublishedMessage("monitor/teams_laptop/state", "OFF", 1, True)
+
+
+@pytest.mark.parametrize(("value", "expected"), [("ON", "ON"), ("OFF", "OFF"), ("UNKNOWN", "None")])
+def test_discovery_template_maps_unknown_to_home_assistant_unknown_payload(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+    value: str,
+    expected: str,
+) -> None:
+    client = FakeMqttClient(messages=[])
+    publisher = HomeAssistantMqttPublisher(client, mqtt_settings, monitor_settings)
+    publisher.publish_discovery()
+    payload = json.loads(client.messages[0].payload)
+
+    assert Environment().from_string(payload["value_template"]).render(value=value) == expected
 
 
 def test_discovery_uses_custom_name_without_changing_identity_or_topics(
@@ -188,14 +267,14 @@ def test_discovery_uses_custom_name_without_changing_identity_or_topics(
         client,
         mqtt_settings,
         monitor_settings,
-        sensor_name="Francho reunido",
+        sensor_name="Desktop meeting",
     )
 
     publisher.publish_discovery()
 
     payload = json.loads(client.messages[0].payload)
-    assert payload["name"] == "Francho reunido"
-    assert payload["default_entity_id"] == "binary_sensor.teams_status_francho_reunido"
+    assert payload["name"] == "Desktop meeting"
+    assert payload["default_entity_id"] == "binary_sensor.teams_status_desktop_meeting"
     assert payload["unique_id"] == "ha_teams_status_teams_meeting"
     assert payload["state_topic"] == "monitor/teams/state"
     assert payload["availability"][0]["topic"] == "monitor/teams/availability"

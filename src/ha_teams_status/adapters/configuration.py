@@ -1,6 +1,7 @@
 """Load and validate local monitor configuration."""
 
 import configparser
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class MqttSettings:
     topic_prefix: str
     tls_enabled: bool
     tls_ca_file: Path | None
+    instance_id: str = "ha_teams_status"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,7 @@ def load_config(path: str | Path) -> MonitorConfig:
         topic_prefix=_required(parser, "mqtt", "topic_prefix"),
         tls_enabled=_boolean(parser, "mqtt", "tls"),
         tls_ca_file=_optional_path(parser, "mqtt", "tls_ca_file"),
+        instance_id=parser.get("mqtt", "instance_id", fallback="ha_teams_status").strip(),
     )
     monitor = MonitorSettings(
         poll_interval_seconds=_integer(parser, "monitor", "poll_interval_seconds"),
@@ -80,6 +83,11 @@ def load_config(path: str | Path) -> MonitorConfig:
         raise ConfigurationError("mqtt port must be between 1 and 65535")
     if not mqtt.discovery_prefix.strip() or not mqtt.topic_prefix.strip():
         raise ConfigurationError("mqtt topic prefixes must not be empty")
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", mqtt.instance_id) is None:
+        raise ConfigurationError(
+            "mqtt instance_id must be 1-48 lowercase ASCII letters, digits, underscores, "
+            "or hyphens, starting with a letter or digit"
+        )
     if any(
         interval <= 0
         for interval in (

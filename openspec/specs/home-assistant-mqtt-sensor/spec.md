@@ -45,11 +45,12 @@ The monitor SHALL publish MQTT discovery information and meeting state so Home A
 - **THEN** the published sensor state represents the corresponding joined or not-joined value
 
 ### Requirement: Preserve uncertainty and sensor availability
-The monitor SHALL keep indeterminate, stale, failed, or unavailable observations distinct from a confirmed not-joined state in Home Assistant.
+The monitor SHALL keep indeterminate, stale, failed, or unavailable observations
+distinct from a confirmed not-joined state in Home Assistant.
 
 #### Scenario: Meeting observation is indeterminate
 - **WHEN** the detector returns an indeterminate observation
-- **THEN** the sensor is unknown or unavailable and is not reported as not joined
+- **THEN** discovery maps the published `UNKNOWN` payload to Home Assistant's unknown binary sensor state, replacing any earlier on or off state
 
 #### Scenario: Detector fails or observations become stale
 - **WHEN** detection fails or no fresh observation is published within the configured validity interval
@@ -99,3 +100,38 @@ The monitor SHALL authenticate to the MQTT broker with configured broker credent
 #### Scenario: No Home Assistant API token is configured
 - **WHEN** the user configures MQTT broker access but no Home Assistant API token
 - **THEN** the monitor can publish the Home Assistant MQTT sensor
+
+### Requirement: Isolate independently configured monitor instances
+The monitor SHALL accept an optional MQTT instance ID and use it for the MQTT
+client ID, Home Assistant discovery node, device identifier, and entity unique ID
+prefix. Omission SHALL preserve the existing `ha_teams_status` identity.
+Instance IDs SHALL contain 1-48 lowercase ASCII letters, digits, underscores,
+or hyphens and SHALL start with a letter or digit.
+
+#### Scenario: Two independently configured computers publish concurrently
+- **WHEN** monitors have different instance IDs and topic prefixes
+- **THEN** their client IDs, discovery topics, device identifiers, entity unique IDs, state topics, and availability topics differ
+
+#### Scenario: Existing configuration omits the instance ID
+- **WHEN** the monitor loads a configuration without `mqtt.instance_id`
+- **THEN** its MQTT and discovery identities remain unchanged
+
+#### Scenario: Invalid instance identity is supplied
+- **WHEN** an instance ID is empty, too long, or contains unsupported characters
+- **THEN** configuration loading fails without exposing its value or connecting
+
+### Requirement: Document a safe Home Assistant combined sensor
+The project SHALL provide a Home Assistant template combining two independent
+source entities without publishing competing updates to a shared state topic.
+
+#### Scenario: At least one available source confirms a joined meeting
+- **WHEN** either source entity is on
+- **THEN** the combined sensor is available and on regardless of the other source
+
+#### Scenario: Both sources confirm no joined meeting
+- **WHEN** both source entities are off
+- **THEN** the combined sensor is available and off
+
+#### Scenario: No source confirms joined and information is incomplete
+- **WHEN** neither source is on and either source is unknown, unavailable, or missing
+- **THEN** the combined sensor is unavailable rather than off

@@ -83,8 +83,8 @@ call has ended. Set `max_joined_duration_seconds` under `[monitor]` to tune the
 limit; it must be a positive integer.
 
 The configured name also determines Home Assistant's initial entity ID. For
-example, `name = Francho reunido` produces
-`binary_sensor.teams_status_francho_reunido`. Home Assistant uses this default
+example, `name = Desktop meeting` produces
+`binary_sensor.teams_status_desktop_meeting`. Home Assistant uses this default
 when the entity is first created; changing the name later does not rename an
 entity already in its entity registry, so rename that entity in Home Assistant
 if needed.
@@ -225,10 +225,115 @@ topic write ha_teams_status/teams/availability
 ```
 
 Do not grant read or wildcard access. If either prefix is changed, update the
-ACL to the corresponding exact topics: `<discovery_prefix>/binary_sensor/ha_teams_status/meeting/config`,
+ACL to the corresponding exact topics: `<discovery_prefix>/binary_sensor/<instance_id>/meeting/config`,
 `<topic_prefix>/state`, and `<topic_prefix>/availability`. Use TLS with
 certificate validation when broker traffic crosses an untrusted network; do
 not disable certificate verification.
+
+### Multiple computers, one visible meeting sensor
+
+Each computer must have a different `[mqtt] instance_id` **and** `topic_prefix`.
+The instance ID controls the MQTT client ID, discovery topic, device identifier,
+and entity unique ID. Changing just the topic prefix or broker username does
+not prevent client disconnections or discovery overwrites.
+
+The optional `instance_id` defaults to `ha_teams_status`, preserving existing
+single-computer installations. It accepts 1-48 lowercase ASCII letters, digits,
+underscores, or hyphens, starting with a letter or digit. Keep it stable:
+changing it creates a new Home Assistant entity/device rather than renaming the
+old one. Sensor names still determine initial entity IDs, so give the sources
+different names.
+
+For an existing computer named `Desktop meeting`, keep its identity
+and topics:
+
+```ini
+[mqtt]
+instance_id = ha_teams_status
+topic_prefix = ha_teams_status/desktop
+
+[sensor]
+name = Desktop meeting
+```
+
+On the second computer, use:
+
+```ini
+[mqtt]
+instance_id = ha_teams_status_laptop
+topic_prefix = ha_teams_status/laptop
+
+[sensor]
+name = Laptop meeting
+```
+
+These are fragments to merge into each computer's existing configuration,
+not complete configurations. Keep its broker, credentials, TLS, discovery
+prefix, and monitor settings. Update **both** installations; for a macOS
+LaunchAgent, reinstall the service to rebuild the bundled executable (a
+`launchctl kickstart` alone still runs the old executable). Stop any old
+foreground process before restarting the service.
+
+With `discovery_prefix = homeassistant`, the corresponding exact Mosquitto ACLs
+are:
+
+```text
+user YOUR_DESKTOP_MQTT_USERNAME
+topic write homeassistant/binary_sensor/ha_teams_status/meeting/config
+topic write ha_teams_status/desktop/state
+topic write ha_teams_status/desktop/availability
+
+user YOUR_LAPTOP_MQTT_USERNAME
+topic write homeassistant/binary_sensor/ha_teams_status_laptop/meeting/config
+topic write ha_teams_status/laptop/state
+topic write ha_teams_status/laptop/availability
+```
+
+Adjust these for your actual usernames and prefixes. Home Assistant's broker
+account also needs read access to both sets of topics through its existing MQTT
+integration permissions.
+
+After both source entities appear, merge
+[`examples/home-assistant-combined.yaml`](examples/home-assistant-combined.yaml)
+into Home Assistant's `configuration.yaml`. If a `template:` section already
+exists, append the example's `- binary_sensor:` entry to that list rather than
+adding another `template:` key. Replace both source entity IDs in the example
+with their actual IDs from **Settings > Devices & services > Entities**; names
+do not rename previously registered entity IDs. Check the Home Assistant
+configuration, then reload Template entities or restart Home Assistant.
+
+The example creates `binary_sensor.teams_meeting_combined` by default (unless that ID
+is already in use). Show only that combined entity on dashboards; remove or
+hide the two source entities from dashboards, but **do not disable them**, as
+the template needs their updates.
+
+| Desktop source | Laptop source | Combined sensor |
+| --- | --- | --- |
+| On | Any state | On |
+| Any state | On | On |
+| Off | Off | Off |
+| Off | Unknown / unavailable / missing | Unavailable |
+| Unknown / unavailable / missing | Off | Unavailable |
+| Unknown / unavailable / missing | Unknown / unavailable / missing | Unavailable |
+
+A disconnected computer does not count as a confirmed Off. The source MQTT
+Last Will, clean shutdown, and state expiry make its entity unavailable;
+indeterminate observations map to Home Assistant's unknown state. Thus an
+offline source's retained ON cannot keep the combined sensor on once its
+availability/state expiry has been processed. If no source confirms a meeting,
+an offline computer deliberately leaves the combined sensor unavailable.
+
+When migrating from two old monitors that shared discovery, stop both old
+processes first. Keep the original `ha_teams_status` identity on the first
+computer so it republishes the existing discovery with the correct topics.
+The second publishes separate discovery with its new identity. No deletion of
+retained discovery is needed for this path.
+
+Verify live behavior after deployment: desktop ON + laptop OFF stays ON;
+desktop OFF + laptop ON stays ON; both OFF becomes OFF; stopping one source
+with the other OFF becomes unavailable; a remaining ON keeps the combined
+sensor ON. Reconnect and confirm recovery. Portable template tests cover the
+state matrix but do not replace these broker/Home Assistant checks.
 
 ## Checks
 

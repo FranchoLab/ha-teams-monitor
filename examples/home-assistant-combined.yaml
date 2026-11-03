@@ -1,0 +1,14 @@
+template:
+  - binary_sensor:
+      - name: Teams meeting combined
+        unique_id: teams_status_meeting_combined
+        default_entity_id: binary_sensor.teams_meeting_combined
+        device_class: running
+        availability: >-
+          {{ is_state('binary_sensor.teams_status_desktop_meeting', 'on')
+             or is_state('binary_sensor.teams_status_laptop_meeting', 'on')
+             or (is_state('binary_sensor.teams_status_desktop_meeting', 'off')
+                 and is_state('binary_sensor.teams_status_laptop_meeting', 'off')) }}
+        state: >-
+          {{ is_state('binary_sensor.teams_status_desktop_meeting', 'on')
+             or is_state('binary_sensor.teams_status_laptop_meeting', 'on') }}
