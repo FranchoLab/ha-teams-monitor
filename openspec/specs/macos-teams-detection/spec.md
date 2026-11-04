@@ -10,34 +10,34 @@ Detect whether the current macOS user has actually joined a Microsoft Teams call
 The detector SHALL report a joined state only when supported evidence indicates the user has joined a Teams call, and SHALL report a not-joined state when supported evidence establishes that the user is not in a call.
 
 #### Scenario: Teams is idle or the user is preparing to join
-- **WHEN** Teams is idle, displaying a pre-join screen, or ringing without the user joining
+- **WHEN** Teams is idle, displaying a pre-join screen, or ringing without the user joining, and either no Teams process is detected or a validated build's supported evidence establishes no joined call
 - **THEN** the detector reports not joined
 
 #### Scenario: User joins a Teams call
-- **WHEN** the user joins a Teams call and the detector has positive joined-call evidence
-- **THEN** the detector reports joined
+- **WHEN** the user joins a Teams call and the complete known joined-call assertion signature is present for the Teams process
+- **THEN** the detector reports joined regardless of whether the installed build has been validated
 
 #### Scenario: User is muted during a call
 - **WHEN** the user remains in a joined Teams call while microphone or camera is muted
-- **THEN** the detector continues to report joined
+- **THEN** the detector continues to report joined while the complete known joined-call assertion signature remains present
 
 #### Scenario: User leaves a Teams call
-- **WHEN** supported evidence establishes that the user has left the call
+- **WHEN** supported evidence for a validated Teams build establishes that the user has left the call
 - **THEN** the detector reports not joined
 
 ### Requirement: Preserve indeterminate detection outcomes
-The detector SHALL represent unsupported, unavailable, stale, or inconclusive observations as indeterminate or as an explicit detection error, never as not joined.
+The detector SHALL represent unsupported, unavailable, stale, or inconclusive observations as indeterminate or as an explicit detection error, never as not joined. For an unvalidated Teams build, the complete known joined-call assertion signature MAY establish joined, but an absent or incomplete signature SHALL remain indeterminate.
 
 #### Scenario: New Teams build retains the known joined-call signature
-- **WHEN** the installed Teams build is not yet validated but the complete known joined-call assertion signature is present
-- **THEN** the result is indeterminate with an unsupported-client or inconclusive reason; the signature alone is not sufficient to report joined
+- **WHEN** the installed Teams build is not yet validated and the complete known joined-call assertion signature is present
+- **THEN** the result is joined
 
 #### Scenario: New Teams build has no known call signature
 - **WHEN** the installed Teams build is not yet validated and the known joined-call assertion signature is absent or incomplete
 - **THEN** the result is indeterminate with an unsupported-client or inconclusive reason and is not reported as not joined
 
 #### Scenario: Signal is not validated as discriminating for the installed build
-- **WHEN** the signal has not been validated to distinguish an active call from idle, pre-join, or post-call states for the installed Teams build
+- **WHEN** the installed Teams build is not yet validated and its assertion signal is absent or incomplete
 - **THEN** the result is indeterminate and is not reported as joined or not joined
 
 #### Scenario: macOS observation fails

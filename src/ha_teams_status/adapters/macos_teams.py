@@ -59,10 +59,10 @@ class MacOSTeamsDetector(MeetingDetector):
 
         if not assertions.process_found:
             return MeetingObservation(ObservationState.NOT_JOINED, observed_at)
-        if assertions.version not in VALIDATED_TEAMS_BUILDS:
-            return self._indeterminate(observed_at, ObservationReason.UNSUPPORTED_CLIENT)
         if _JOINED_ASSERTIONS.issubset(assertions.assertion_types):
             return MeetingObservation(ObservationState.JOINED, observed_at)
+        if assertions.version not in VALIDATED_TEAMS_BUILDS:
+            return self._indeterminate(observed_at, ObservationReason.UNSUPPORTED_CLIENT)
         if not assertions.assertion_types:
             return MeetingObservation(ObservationState.NOT_JOINED, observed_at)
         return self._indeterminate(observed_at, ObservationReason.SIGNAL_INCONCLUSIVE)

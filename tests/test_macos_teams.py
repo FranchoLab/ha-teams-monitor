@@ -68,10 +68,13 @@ def test_detector_does_not_report_joined_without_both_assertions(
         assert observation.reason is ObservationReason.SIGNAL_INCONCLUSIVE
 
 
-@pytest.mark.parametrize("version", VALIDATED_BUILDS)
-def test_detector_reports_joined_only_for_validated_assertion_pair(
+@pytest.mark.parametrize(
+    "version",
+    [*VALIDATED_BUILDS, None, "unvalidated-build", "26300.0.0.0"],
+)
+def test_detector_reports_joined_for_complete_assertion_pair(
     monkeypatch: pytest.MonkeyPatch,
-    version: str,
+    version: str | None,
 ) -> None:
     detector = make_detector(
         monkeypatch,
@@ -85,32 +88,22 @@ def test_detector_reports_joined_only_for_validated_assertion_pair(
 
 
 @pytest.mark.parametrize("version", [None, "unvalidated-build", "26300.0.0.0"])
-def test_detector_reports_unvalidated_client_without_signature_as_indeterminate(
-    monkeypatch: pytest.MonkeyPatch,
-    version: str | None,
-) -> None:
-    detector = make_detector(
-        monkeypatch,
-        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, version, frozenset())),
-    )
-
-    observation = detector.detect()
-
-    assert observation.state is ObservationState.INDETERMINATE
-    assert observation.reason is ObservationReason.UNSUPPORTED_CLIENT
-
-
 @pytest.mark.parametrize(
-    "version",
-    [None, "unvalidated-build", "26300.0.0.0"],
+    "assertion_types",
+    [
+        frozenset(),
+        frozenset({"NoDisplaySleepAssertion"}),
+        frozenset({"NoIdleSleepAssertion"}),
+    ],
 )
-def test_detector_reports_complete_signature_on_unvalidated_build_as_indeterminate(
+def test_detector_reports_unvalidated_client_with_incomplete_signature_as_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     version: str | None,
+    assertion_types: frozenset[str],
 ) -> None:
     detector = make_detector(
         monkeypatch,
-        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, version, JOINED_ASSERTIONS)),
+        FakeAssertionSource(snapshot=TeamsPowerAssertions(True, version, assertion_types)),
     )
 
     observation = detector.detect()

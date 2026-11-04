@@ -2,12 +2,13 @@
 
 Standalone monitor for publishing a Teams meeting binary sensor to Home
 Assistant over MQTT. The monitor, configuration loader, and MQTT connector are
-implemented. Live detection has been validated for the macOS Teams build and
-state matrix documented below. A Windows connector for the New Teams
-Third-Party API is implemented but has not yet been verified on a native
-Windows host; do not treat Windows live detection as validated support until
-its native state matrix passes. Linux is for development and portable tests
-rather than live monitoring.
+implemented. The macOS detector uses its complete known joined-call signal
+regardless of Teams build number; interpretation of absent signals remains
+conservative on builds without a validated state matrix. A Windows connector
+for the New Teams Third-Party API is implemented but has not yet been verified
+on a native Windows host; do not treat Windows live detection as validated
+support until its native state matrix passes. Linux is for development and
+portable tests rather than live monitoring.
 
 A per-user macOS login agent is available for automatic startup; it is
 optional. Microsoft tenant consent, a Home Assistant API token, and production
@@ -112,8 +113,8 @@ uv run --frozen ha-teams-status --debug --config ./monitor.conf
 ```
 
 Logs do not include credentials, meeting titles, participants, or raw assertion
-output. For a suspected missed hangup, compare the sanitized macOS signal while
-joined and after leaving:
+output. To investigate a suspected incorrect state transition, inspect the
+sanitized macOS signal:
 
 ```text
 mise exec -- uv run --frozen python scripts/macos_teams_api_diagnostic.py
@@ -403,20 +404,25 @@ joined and muted calls produced `NoDisplaySleepAssertion` and
 The diagnostic matrix supplied for Teams build `26289.203.5259.2574` reported
 no assertions while waiting to join, both assertions in a meeting, and no
 assertions after leaving. The detector accepts these two builds based on their
-observed state matrices; this does not establish compatibility for later
-builds.
+observed state matrices. The detector reports joined on any build when the
+Teams process owns both `NoDisplaySleepAssertion` and `NoIdleSleepAssertion`.
+This pair was also observed during a joined call on build
+`26289.204.5281.6363`, without a full state matrix for that build.
 
-To repeat the check after a Teams or macOS update, run the
-`mise exec -- uv run --frozen python scripts/macos_teams_api_diagnostic.py`
-command as a standard user, without `sudo` or Full Disk Access, in each of
-these states: idle, pre-join, ringing, joined, muted, and after leaving. Record
-the exact build and assertion type names; the diagnostic prints only those
-values. The detector reports joined only for builds whose signal has been
-validated to distinguish an active call from idle, pre-join, and after-hangup
-states. An unvalidated build reports UNKNOWN even when the complete assertion
-pair is present. No version-independent, officially documented local macOS
-call-state API was found, so a future Teams build may remain UNKNOWN during a
-real call until its state matrix is validated.
+For a build without a validated state matrix, an absent or incomplete pair is
+UNKNOWN rather than not joined; after leaving a call, the monitor may therefore
+remain UNKNOWN until the build is validated. The known build matrix is still
+used to interpret an empty signal as not joined. No Teams build needs to be
+added to the allowlist for a complete pair to report joined.
+
+This version-independent positive signal avoids revalidating every Teams
+update, with an accepted risk: a future build could emit the complete pair
+outside a call and cause a false joined state. If detection behaves
+unexpectedly, run `mise exec -- uv run --frozen python
+scripts/macos_teams_api_diagnostic.py` as a standard user, without `sudo` or
+Full Disk Access, and compare the build and assertion type names in the
+relevant state. Do not collect or share raw system assertion output, which may
+contain meeting details.
 
 Platform support and runtime behavior:
 
