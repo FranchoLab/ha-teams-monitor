@@ -129,10 +129,12 @@ class HomeAssistantMqttPublisher:
                 }
             ],
             "device": {
-                "identifiers": [self._mqtt.instance_id],
+                "identifiers": [
+                    self._mqtt.device_identifier or self._mqtt.instance_id,
+                ],
                 "manufacturer": "Local monitor",
                 "model": "Teams MQTT sensor",
-                "name": "teams status",
+                "name": self._mqtt.device_name,
             },
             "device_class": "running",
             "expire_after": self._monitor.availability_expiry_seconds,

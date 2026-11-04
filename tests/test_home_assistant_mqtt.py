@@ -174,6 +174,7 @@ def test_discovery_uses_stable_identity_and_configured_topics(
     assert message.retain
     assert payload["unique_id"] == "ha_teams_status_teams_meeting"
     assert payload["device"]["identifiers"] == ["ha_teams_status"]
+    assert payload["device"]["name"] == "teams status"
     assert payload["name"] == "Teams meeting"
     assert payload["default_entity_id"] == "binary_sensor.teams_status_teams_meeting"
     assert payload["state_topic"] == "monitor/teams/state"
@@ -241,6 +242,58 @@ def test_two_sources_have_independent_discovery_state_and_availability(
 
     assert clients[0].messages[-1] == PublishedMessage("monitor/teams/state", "ON", 1, True)
     assert clients[1].messages[-1] == PublishedMessage("monitor/teams_laptop/state", "OFF", 1, True)
+
+
+def test_two_sources_can_share_home_assistant_device_identity(
+    mqtt_settings: MqttSettings,
+    monitor_settings: MonitorSettings,
+) -> None:
+    clients = [FakeMqttClient(messages=[]), FakeMqttClient(messages=[])]
+    settings = [
+        replace(
+            mqtt_settings,
+            instance_id="ha_teams_status",
+            device_identifier="ha_teams_computers",
+            device_name="Teams computers",
+            topic_prefix="monitor/desktop",
+        ),
+        replace(
+            mqtt_settings,
+            instance_id="ha_teams_status_laptop",
+            device_identifier="ha_teams_computers",
+            device_name="Teams computers",
+            topic_prefix="monitor/laptop",
+        ),
+    ]
+    publishers = [
+        HomeAssistantMqttPublisher(
+            client,
+            source,
+            monitor_settings,
+            sensor_name=sensor_name,
+        )
+        for client, source, sensor_name in zip(
+            clients,
+            settings,
+            ["Desktop meeting", "Laptop meeting"],
+            strict=True,
+        )
+    ]
+
+    for publisher in publishers:
+        publisher.publish_discovery()
+    payloads = [json.loads(client.messages[0].payload) for client in clients]
+
+    assert publishers[0].discovery_topic != publishers[1].discovery_topic
+    assert payloads[0]["device"]["identifiers"] == ["ha_teams_computers"]
+    assert payloads[1]["device"]["identifiers"] == ["ha_teams_computers"]
+    assert payloads[0]["device"]["name"] == "Teams computers"
+    assert payloads[1]["device"]["name"] == "Teams computers"
+    assert payloads[0]["name"] == "Desktop meeting"
+    assert payloads[1]["name"] == "Laptop meeting"
+    assert payloads[0]["unique_id"] != payloads[1]["unique_id"]
+    assert payloads[0]["state_topic"] != payloads[1]["state_topic"]
+    assert payloads[0]["availability"][0]["topic"] != payloads[1]["availability"][0]["topic"]
 
 
 @pytest.mark.parametrize(("value", "expected"), [("ON", "ON"), ("OFF", "OFF"), ("UNKNOWN", "None")])

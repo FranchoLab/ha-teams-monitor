@@ -11,6 +11,7 @@ class ConfigurationError(Exception):
 
 
 _DEFAULT_MAX_JOINED_DURATION_SECONDS = 8 * 60 * 60
+_MQTT_IDENTIFIER_PATTERN = r"[a-z0-9][a-z0-9_-]{0,47}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,8 @@ class MqttSettings:
     tls_enabled: bool
     tls_ca_file: Path | None
     instance_id: str = "ha_teams_status"
+    device_identifier: str | None = None
+    device_name: str = "teams status"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,8 @@ def load_config(path: str | Path) -> MonitorConfig:
     except (OSError, UnicodeError, configparser.Error):
         raise ConfigurationError("configuration file is unreadable or invalid") from None
 
+    instance_id = parser.get("mqtt", "instance_id", fallback="ha_teams_status").strip()
+    device_identifier = parser.get("mqtt", "device_identifier", fallback=instance_id).strip()
     mqtt = MqttSettings(
         host=_required(parser, "mqtt", "host"),
         port=_integer(parser, "mqtt", "port"),
@@ -60,7 +65,9 @@ def load_config(path: str | Path) -> MonitorConfig:
         topic_prefix=_required(parser, "mqtt", "topic_prefix"),
         tls_enabled=_boolean(parser, "mqtt", "tls"),
         tls_ca_file=_optional_path(parser, "mqtt", "tls_ca_file"),
-        instance_id=parser.get("mqtt", "instance_id", fallback="ha_teams_status").strip(),
+        instance_id=instance_id,
+        device_identifier=device_identifier,
+        device_name=parser.get("mqtt", "device_name", fallback="teams status").strip(),
     )
     monitor = MonitorSettings(
         poll_interval_seconds=_integer(parser, "monitor", "poll_interval_seconds"),
@@ -83,11 +90,21 @@ def load_config(path: str | Path) -> MonitorConfig:
         raise ConfigurationError("mqtt port must be between 1 and 65535")
     if not mqtt.discovery_prefix.strip() or not mqtt.topic_prefix.strip():
         raise ConfigurationError("mqtt topic prefixes must not be empty")
-    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,47}", mqtt.instance_id) is None:
+    if re.fullmatch(_MQTT_IDENTIFIER_PATTERN, mqtt.instance_id) is None:
         raise ConfigurationError(
             "mqtt instance_id must be 1-48 lowercase ASCII letters, digits, underscores, "
             "or hyphens, starting with a letter or digit"
         )
+    if (
+        mqtt.device_identifier is None
+        or re.fullmatch(_MQTT_IDENTIFIER_PATTERN, mqtt.device_identifier) is None
+    ):
+        raise ConfigurationError(
+            "mqtt device_identifier must be 1-48 lowercase ASCII letters, digits, underscores, "
+            "or hyphens, starting with a letter or digit"
+        )
+    if not mqtt.device_name.strip():
+        raise ConfigurationError("mqtt device_name must not be empty")
     if any(
         interval <= 0
         for interval in (

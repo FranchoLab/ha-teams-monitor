@@ -33,6 +33,8 @@ def test_load_config_preserves_literal_password_characters(tmp_path: Path) -> No
     assert "p%#;=word" not in repr(config)
     assert config.mqtt.port == 1883
     assert config.mqtt.instance_id == "ha_teams_status"
+    assert config.mqtt.device_identifier == "ha_teams_status"
+    assert config.mqtt.device_name == "teams status"
     assert config.monitor.poll_interval_seconds == 5
     assert config.monitor.max_joined_duration_seconds == 8 * 60 * 60
     assert config.sensor_name == "Teams meeting"
@@ -46,7 +48,79 @@ def test_load_config_reads_instance_id(tmp_path: Path, instance_id: str) -> None
         encoding="utf-8",
     )
 
-    assert load_config(config_file).mqtt.instance_id == instance_id
+    config = load_config(config_file)
+    assert config.mqtt.instance_id == instance_id
+    assert config.mqtt.device_identifier == instance_id
+
+
+@pytest.mark.parametrize(
+    "device_identifier",
+    ["ha_teams_status_desktop", "laptop-1", "a", "1" * 48],
+)
+def test_load_config_reads_device_identifier(
+    tmp_path: Path,
+    device_identifier: str,
+) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", f"[mqtt]\ndevice_identifier = {device_identifier}"),
+        encoding="utf-8",
+    )
+
+    assert load_config(config_file).mqtt.device_identifier == device_identifier
+
+
+@pytest.mark.parametrize(
+    "device_identifier",
+    [
+        "",
+        "   ",
+        "A",
+        "private/identity",
+        "with spaces",
+        "+",
+        "#",
+        "café",
+        "_device",
+        "-device",
+        "a" * 49,
+    ],
+)
+def test_load_config_rejects_invalid_device_identifier(
+    tmp_path: Path,
+    device_identifier: str,
+) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", f"[mqtt]\ndevice_identifier = {device_identifier}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="mqtt device_identifier must be") as error:
+        load_config(config_file)
+
+    assert "private/identity" not in str(error.value)
+
+
+def test_load_config_reads_custom_device_name(tmp_path: Path) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", "[mqtt]\ndevice_name = My workstation"),
+        encoding="utf-8",
+    )
+
+    assert load_config(config_file).mqtt.device_name == "My workstation"
+
+
+def test_load_config_rejects_empty_device_name(tmp_path: Path) -> None:
+    config_file = tmp_path / "monitor.conf"
+    config_file.write_text(
+        CONFIG.replace("[mqtt]", "[mqtt]\ndevice_name =   "),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="mqtt device_name must not be empty"):
+        load_config(config_file)
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
 
-LABEL = "com.ha-teams-status.monitor"
+LABEL = "francholab.ha-teams-status"
+LEGACY_LABEL = "com.ha-teams-status.monitor"
 LAUNCHCTL = "/bin/launchctl"
 EXECUTABLE_NAME = "ha-teams-status"
 
@@ -26,6 +27,7 @@ CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 @dataclass(frozen=True, slots=True)
 class LaunchAgentPaths:
     plist: Path
+    legacy_plist: Path
     stdout: Path
     stderr: Path
     runtime: Path
@@ -39,8 +41,10 @@ def require_macos() -> None:
 
 def launch_agent_paths(home: Path | None = None) -> LaunchAgentPaths:
     user_home = (home or Path.home()).expanduser().resolve()
+    launch_agents = user_home / "Library" / "LaunchAgents"
     return LaunchAgentPaths(
-        plist=user_home / "Library" / "LaunchAgents" / f"{LABEL}.plist",
+        plist=launch_agents / f"{LABEL}.plist",
+        legacy_plist=launch_agents / f"{LEGACY_LABEL}.plist",
         stdout=user_home / "Library" / "Logs" / "ha-teams-status" / "stdout.log",
         stderr=user_home / "Library" / "Logs" / "ha-teams-status" / "stderr.log",
         runtime=user_home / "Library" / "Application Support" / "ha-teams-status" / "runtime",
@@ -182,7 +186,8 @@ class MacOSLoginAgent:
             serialized = plistlib.dumps(definition, sort_keys=True)
             staging_parent = self._prepare_directories_and_stage(executable.parent)
             try:
-                self._bootout_if_registered()
+                self._remove_legacy_registration()
+                self._bootout_if_registered(LABEL, self.paths.plist)
                 backup = self._replace_runtime(staging_parent / "runtime")
                 self._write_plist(serialized)
                 self._launchctl("bootstrap", str(self.paths.plist))
@@ -198,12 +203,21 @@ class MacOSLoginAgent:
 
     def uninstall(self) -> None:
         require_macos()
-        self._bootout_if_registered()
+        self._remove_legacy_registration()
+        self._bootout_if_registered(LABEL, self.paths.plist)
+        self._remove_plist(self.paths.plist)
+        self._remove_runtime(self.paths.runtime)
+
+    def _remove_legacy_registration(self) -> None:
+        self._bootout_if_registered(LEGACY_LABEL, self.paths.legacy_plist)
+        self._remove_plist(self.paths.legacy_plist)
+
+    @staticmethod
+    def _remove_plist(plist: Path) -> None:
         try:
-            self.paths.plist.unlink(missing_ok=True)
+            plist.unlink(missing_ok=True)
         except OSError as error:
             raise LaunchAgentError(f"unable to remove login agent definition: {error}") from None
-        self._remove_runtime(self.paths.runtime)
 
     def _prepare_directories_and_stage(self, built_bundle: Path) -> Path:
         staging_parent: Path | None = None
@@ -258,8 +272,8 @@ class MacOSLoginAgent:
         except OSError as error:
             raise LaunchAgentError(f"unable to remove login agent runtime: {error}") from None
 
-    def _bootout_if_registered(self) -> None:
-        service = f"{self.domain}/{LABEL}"
+    def _bootout_if_registered(self, label: str, plist: Path) -> None:
+        service = f"{self.domain}/{label}"
         try:
             status = self._command_runner([LAUNCHCTL, "print", service])
         except OSError as error:
@@ -270,9 +284,7 @@ class MacOSLoginAgent:
             self._raise_command_error("check login agent status", status)
 
         try:
-            result = self._command_runner(
-                [LAUNCHCTL, "bootout", self.domain, str(self.paths.plist)]
-            )
+            result = self._command_runner([LAUNCHCTL, "bootout", self.domain, str(plist)])
         except OSError as error:
             raise LaunchAgentError(f"unable to run launchctl bootout: {error}") from None
         if result.returncode != 0:

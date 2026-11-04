@@ -178,8 +178,10 @@ uv run --frozen ha-teams-status service install --config ./monitor.conf
 
 Install and uninstall run as the current standard user; do not use `sudo`. The
 agent runs only in that user's logged-in macOS session. Its plist is
-`~/Library/LaunchAgents/com.ha-teams-status.monitor.plist`. Installation builds
-a standalone executable named `ha-teams-status` under
+`~/Library/LaunchAgents/francholab.ha-teams-status.plist`. On install, the
+monitor unloads and removes any prior `com.ha-teams-status.monitor` agent and
+plist before registering the new label. Installation builds a standalone
+executable named `ha-teams-status` under
 `~/Library/Application Support/ha-teams-status/runtime`; Activity Monitor and
 process inspection can identify it by that name rather than as `python`. The
 LaunchAgent invokes this executable with the absolute config path. Its plist
@@ -189,8 +191,8 @@ and restrict access to the user account as described above.
 Check or manually restart the registered job with:
 
 ```text
-launchctl print gui/$(id -u)/com.ha-teams-status.monitor
-launchctl kickstart -k gui/$(id -u)/com.ha-teams-status.monitor
+launchctl print gui/$(id -u)/francholab.ha-teams-status
+launchctl kickstart -k gui/$(id -u)/francholab.ha-teams-status
 ```
 
 The agent writes standard output and errors to
@@ -201,8 +203,9 @@ The agent writes standard output and errors to
 uv run --frozen ha-teams-status service uninstall
 ```
 
-Uninstall removes the generated executable but keeps the config, logs, and
-retained Home Assistant MQTT discovery. Reinstall the agent after updating the
+Uninstall removes the generated executable and any remaining current or legacy
+LaunchAgent plist but keeps the config, logs, and retained Home Assistant MQTT
+discovery. Reinstall the agent after updating the
 application to rebuild the executable; its configuration path remains
 absolute.
 
@@ -233,16 +236,24 @@ not disable certificate verification.
 ### Multiple computers, one visible meeting sensor
 
 Each computer must have a different `[mqtt] instance_id` **and** `topic_prefix`.
-The instance ID controls the MQTT client ID, discovery topic, device identifier,
-and entity unique ID. Changing just the topic prefix or broker username does
-not prevent client disconnections or discovery overwrites.
+The instance ID controls the MQTT client ID, discovery topic, and entity unique
+ID. The optional `device_identifier` controls Home Assistant device grouping
+and defaults to the instance ID; `device_name` controls the device's display
+name and defaults to `teams status`. Changing just the topic prefix or broker
+username does not prevent client disconnections or discovery overwrites.
 
 The optional `instance_id` defaults to `ha_teams_status`, preserving existing
 single-computer installations. It accepts 1-48 lowercase ASCII letters, digits,
 underscores, or hyphens, starting with a letter or digit. Keep it stable:
-changing it creates a new Home Assistant entity/device rather than renaming the
-old one. Sensor names still determine initial entity IDs, so give the sources
-different names.
+changing it creates a new Home Assistant entity rather than renaming the old
+one. `device_identifier` accepts the same characters and length; keep it stable
+because changing it creates a new Home Assistant device identity. Sensor names
+still determine initial entity IDs, so give the sources different names.
+
+To keep two separate sensor entities under one Home Assistant device, set the
+same `device_identifier` and `device_name` on both computers while keeping
+their instance IDs and topic prefixes different. The example below keeps the
+existing desktop identity and uses it as the shared device identifier.
 
 For an existing computer named `Desktop meeting`, keep its identity
 and topics:
@@ -250,6 +261,8 @@ and topics:
 ```ini
 [mqtt]
 instance_id = ha_teams_status
+device_identifier = ha_teams_status
+device_name = Teams computers
 topic_prefix = ha_teams_status/desktop
 
 [sensor]
@@ -261,6 +274,8 @@ On the second computer, use:
 ```ini
 [mqtt]
 instance_id = ha_teams_status_laptop
+device_identifier = ha_teams_status
+device_name = Teams computers
 topic_prefix = ha_teams_status/laptop
 
 [sensor]
