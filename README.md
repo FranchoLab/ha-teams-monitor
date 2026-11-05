@@ -155,9 +155,10 @@ pre-join, joined, muted, left, and ringing:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows_teams_log_discovery.ps1
 ```
 
-It prints and saves (under `%TEMP%`) only file-name and line shapes, encodings,
-file rotation events, and filtered marker candidates per labelled state. It never
-prints or saves raw log lines. Review the report before sharing it.
+It prints and saves (under `%TEMP%`) only masked file-name shapes, encodings,
+file rotation events, safe field names and types, allow-listed state values, and
+counts of call/state word pairs per labelled interval. Unknown field values and
+raw log lines are never printed or saved. Review the report before sharing it.
 
 ### Optional macOS login agent
 

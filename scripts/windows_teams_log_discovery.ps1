@@ -8,10 +8,10 @@ marker candidates appended to the logs while you move Teams through labelled sta
 (idle, prejoin, ringing, joined, muted, left, ...).
 
 The probe never prints or saves raw log lines. It reports only file-name shapes,
-sizes, encodings, line shapes (letters -> 'a', digits -> '9'), and identifier-like
-tokens or key/value pairs whose key mentions call/meeting/state vocabulary. Values of
-keys that look like names, titles, identifiers, URLs, or message text are dropped.
-Review the report before sharing it anyway.
+sizes, encodings, line shapes (letters -> 'a', digits -> '9'), safe field names and
+types, allow-listed state values, and counts of call/state word pairs. Values that
+are not known state words and fields that could contain personal or meeting details
+are dropped. Review the report before sharing it anyway.
 
 It opens files read-only with sharing enabled, needs no elevation, and does not
 change Teams settings.
@@ -35,15 +35,21 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $PackageRelativeLogPath = 'Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs'
-$MarkerKeywords = 'call|meeting|join|leave|left|hang|end|disconnect|connect|ring|incoming|mute|state|status|presence|activity|busy|conversation|media|audio|video|room|lobby'
-$SensitiveKeyPattern = 'name|title|subject|user|display|mail|upn|tenant|id$|ids$|uri|url|link|message|text|body|topic|organi[sz]er|participant|thread|phone|number|token|key|secret|path|file|host|address|caller|callee|sender|recipient|attendee|member|person|contact|alias|account|identity|owner|creator|from'
-$TokenPattern = [regex]'[A-Za-z_][A-Za-z0-9_.\-]{2,63}'
-# Bare tokens must look like code identifiers so plain words such as personal names are dropped.
-$CompoundTokenRegex = [regex]'[a-z][A-Z]|[_.]'
+$MarkerKeywords = 'call|meeting|join|leave|left|hang|end|disconnect|connect|ring|incoming|mute|state|status|presence|activity|busy|conversation|room|lobby|event|type|action|phase|transition|operation|result|outcome|reason|connection'
+$SensitiveKeyPattern = 'name|title|subject|user|display|mail|upn|tenant|id$|ids$|uri|url|link|message|text|body|topic|organi[sz]er|participant|thread|phone|number|token|key|secret|path|file|folder|directory|location|host|address|caller|callee|sender|recipient|attendee|member|person|contact|alias|account|identity|owner|creator|from'
 $KeyValuePattern = [regex]'(?<key>[A-Za-z_][A-Za-z0-9_.\-]{1,48})"?\s*[:=]\s*"?(?<value>[A-Za-z_][A-Za-z0-9_.\-]{0,31})\b'
 $MarkerRegex = [regex]::new($MarkerKeywords, 'IgnoreCase')
+$StateValueWords = @(
+    'active', 'call', 'connected', 'connecting', 'connection',
+    'conversation', 'ended', 'ending', 'false', 'hang', 'hangup', 'idle', 'in',
+    'inactive', 'incoming', 'is', 'join', 'joined', 'joining', 'leave', 'leaving',
+    'left', 'lobby', 'meeting', 'mute', 'muted', 'no', 'not', 'off', 'on', 'out',
+    'ring', 'ringing', 'session', 'state', 'status', 'stopped', 'true', 'unmuted',
+    'was', 'waiting', 'yes'
+)
 $SensitiveKeyRegex = [regex]::new($SensitiveKeyPattern, 'IgnoreCase')
-$UnsafeTokenRegex = [regex]'@|[0-9A-Fa-f]{8,}|[0-9]{5,}|https?|www\.|\\|/'
+$SafePropertyNameRegex = [regex]'^[A-Za-z_][A-Za-z0-9_.\-]{0,47}$'
+$SafePropertyPathRegex = [regex]'^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,191}$'
 
 $Report = New-Object System.Collections.Generic.List[string]
 
@@ -135,29 +141,129 @@ function Get-LogFiles {
 function Get-RelativeShape {
     param([string]$Root, [string]$FullName)
     $relative = $FullName.Substring($Root.Length).TrimStart('\', '/')
-    $relative = [regex]::Replace($relative, '[0-9]', '9')
-    return [regex]::Replace($relative, '[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}', '<guid>')
+    $parts = foreach ($part in ($relative -split '[\\/]')) {
+        $extension = [System.IO.Path]::GetExtension($part).ToLowerInvariant()
+        $stem = if ($extension) { $part.Substring(0, $part.Length - $extension.Length) } else { $part }
+        (Get-Shape -Text $stem -MaxLength 48) + $extension
+    }
+    return $parts -join '/'
+}
+
+function Add-FieldCandidate {
+    param([string]$Key, [object]$Value, [hashtable]$Counts)
+    $leaf = ($Key -split '[.]')[-1] -replace '\[\]$', ''
+    if (-not $MarkerRegex.IsMatch($leaf) -or $SensitiveKeyRegex.IsMatch($Key)) { return }
+    if (-not $SafePropertyPathRegex.IsMatch($Key)) { return }
+
+    $safeKey = [regex]::Replace($Key, '[0-9]+', '#')
+    $type = if ($null -eq $Value) { 'null' } elseif ($Value -is [bool]) { 'boolean' } elseif ($Value -is [string]) { 'string' } elseif ($Value -is [ValueType]) { 'number' } else { 'other' }
+    $typeCandidate = "field:$safeKey`:$type"
+    $Counts[$typeCandidate] = 1 + [int]$Counts[$typeCandidate]
+
+    $safeValue = Get-SafeStateValue -Value $Value
+    if (-not $safeValue -and $type -eq 'number' -and $leaf -match '^(state|status|phase|result|outcome)$') {
+        $number = 0
+        if ([int]::TryParse([string]$Value, [ref]$number) -and $number -ge -1 -and $number -le 10) {
+            $safeValue = "enum$number"
+        }
+    }
+    if ($safeValue) {
+        $valueCandidate = "field:$safeKey`:$safeValue"
+        $Counts[$valueCandidate] = 1 + [int]$Counts[$valueCandidate]
+    }
+}
+
+function Get-SafeStateValue {
+    param([object]$Value)
+    if ($Value -is [bool]) { return $Value.ToString().ToLowerInvariant() }
+    if ($Value -isnot [string]) { return '' }
+
+    $text = $Value.Trim()
+    if ($text.Length -gt 64) { return '' }
+    $text = [regex]::Replace($text, '([a-z])([A-Z])', '$1 $2')
+    if ($text -notmatch '^[A-Za-z]+(?:[\s_.:/-]+[A-Za-z]+)*$') { return '' }
+
+    $words = @([regex]::Matches($text, '[A-Za-z]+') | ForEach-Object { $_.Value.ToLowerInvariant() })
+    if ($words.Count -eq 0) { return '' }
+    foreach ($word in $words) {
+        if ($StateValueWords -notcontains $word) { return '' }
+    }
+    return $words -join ''
+}
+
+function Add-JsonFieldCandidates {
+    param([object]$Value, [string]$Path, [hashtable]$Counts, [int]$Depth = 0)
+    if ($Depth -gt 8 -or $null -eq $Value) { return }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) {
+            $name = [string]$key
+            if (-not $SafePropertyNameRegex.IsMatch($name) -or $SensitiveKeyRegex.IsMatch($name)) { continue }
+            $childPath = if ($Path) { "$Path.$name" } else { $name }
+            Add-JsonFieldCandidates -Value $Value[$key] -Path $childPath -Counts $Counts -Depth ($Depth + 1)
+        }
+        return
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($property.MemberType -notin @('NoteProperty', 'Property')) { continue }
+            if (-not $SafePropertyNameRegex.IsMatch($property.Name) -or $SensitiveKeyRegex.IsMatch($property.Name)) { continue }
+            $childPath = if ($Path) { "$Path.$($property.Name)" } else { $property.Name }
+            Add-JsonFieldCandidates -Value $property.Value -Path $childPath -Counts $Counts -Depth ($Depth + 1)
+        }
+        return
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        foreach ($item in $Value) {
+            Add-JsonFieldCandidates -Value $item -Path "$Path[]" -Counts $Counts -Depth ($Depth + 1)
+        }
+        return
+    }
+    Add-FieldCandidate -Key $Path -Value $Value -Counts $Counts
 }
 
 function Get-MarkerCandidates {
     param([string]$Text)
     $counts = @{}
-    foreach ($match in $TokenPattern.Matches($Text)) {
-        $token = $match.Value
-        if (-not $MarkerRegex.IsMatch($token)) { continue }
-        if (-not $CompoundTokenRegex.IsMatch($token)) { continue }
-        if ($UnsafeTokenRegex.IsMatch($token)) { continue }
-        $token = [regex]::Replace($token, '[0-9]+', '#')
-        $counts[$token] = 1 + [int]$counts[$token]
-    }
-    foreach ($match in $KeyValuePattern.Matches($Text)) {
-        $key = $match.Groups['key'].Value
-        $value = $match.Groups['value'].Value
-        if (-not $MarkerRegex.IsMatch($key)) { continue }
-        if ($SensitiveKeyRegex.IsMatch($key)) { continue }
-        if ($UnsafeTokenRegex.IsMatch($key) -or $UnsafeTokenRegex.IsMatch($value)) { continue }
-        $pair = ([regex]::Replace($key, '[0-9]+', '#')) + '=' + ([regex]::Replace($value, '[0-9]+', '#'))
-        $counts[$pair] = 1 + [int]$counts[$pair]
+    foreach ($line in ($Text -split "`r?`n")) {
+        if (-not $line.Trim()) { continue }
+
+        $start = $line.IndexOf('{')
+        $end = $line.LastIndexOf('}')
+        $jsonParsed = $false
+        $record = $null
+        if ($start -ge 0 -and $end -gt $start) {
+            $jsonText = $line.Substring($start, $end - $start + 1)
+            try {
+                $record = ConvertFrom-Json -InputObject $jsonText -ErrorAction Stop
+                $jsonParsed = $true
+            }
+            catch {
+                # Non-JSON lines are handled by the key/value and safe word-pair scans.
+            }
+        }
+
+        if ($jsonParsed) {
+            Add-JsonFieldCandidates -Value $record -Path '' -Counts $counts
+        }
+        else {
+            foreach ($match in $KeyValuePattern.Matches($line)) {
+                $key = $match.Groups['key'].Value
+                if ($SensitiveKeyRegex.IsMatch($key)) { continue }
+                Add-FieldCandidate -Key $key -Value $match.Groups['value'].Value -Counts $counts
+            }
+        }
+
+        $normalized = [regex]::Replace($line, '([a-z])([A-Z])', '$1 $2')
+        $words = @([regex]::Matches($normalized, '[A-Za-z]+') | ForEach-Object { $_.Value.ToLowerInvariant() })
+        $contexts = @($words | Where-Object { $_ -in @('call', 'meeting', 'conversation', 'conference') } | Select-Object -Unique)
+        $states = @($words | Where-Object { $_ -in @('join', 'joined', 'joining', 'leave', 'leaving', 'left', 'end', 'ended', 'ending', 'connect', 'connected', 'connecting', 'disconnect', 'disconnected', 'ring', 'ringing', 'incoming', 'active', 'inactive', 'idle') } | Select-Object -Unique)
+        foreach ($context in $contexts) {
+            foreach ($state in $states) {
+                $pair = "text:$context+$state"
+                $counts[$pair] = 1 + [int]$counts[$pair]
+            }
+        }
     }
     return $counts
 }
@@ -229,6 +335,7 @@ function Read-Segment {
     $maxBytes = [long]$MaxMegabytesPerRead * 1MB
     $events = New-Object System.Collections.Generic.List[string]
     $combined = @{}
+    $perFile = @{}
     $totalBytes = [long]0
     $totalLines = 0
     $current = Get-Snapshot -Root $Root
@@ -303,11 +410,14 @@ function Read-Segment {
         $candidates = Get-MarkerCandidates -Text $text
         foreach ($key in $candidates.Keys) {
             $combined[$key] = [int]$combined[$key] + $candidates[$key]
+            $fileCandidate = "$shape :: $key"
+            $perFile[$fileCandidate] = [int]$perFile[$fileCandidate] + $candidates[$key]
         }
     }
     return [pscustomobject]@{
         Events = $events
         Candidates = $combined
+        PerFile = $perFile
         Bytes = $totalBytes
         Lines = $totalLines
     }
@@ -317,7 +427,8 @@ function Invoke-Capture {
     param([string]$Root)
     Write-Report ''
     Write-Report '== Capture'
-    Write-Report 'Put Teams in a state, wait about 30 seconds, then type a label for the state you are now in.'
+    Write-Report 'Change Teams to a state, wait about 30 seconds, then type that state label.'
+    Write-Report 'Each label summarizes log changes since the previous label; the first covers time since capture started.'
     Write-Report 'Suggested order: idle, prejoin, joined, muted, unmuted, left, ringing, declined, joined2, left2.'
     Write-Report 'Each segment covers log data appended since the previous label. Type q to finish.'
 
@@ -360,6 +471,11 @@ function Invoke-Capture {
         foreach ($entry in $newOnes) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
         Write-Report '  most frequent candidates:'
         foreach ($entry in ($ranked | Select-Object -First $TopCount)) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
+        Write-Report '  candidate signatures by sanitized file-name shape:'
+        $fileRanked = $segment.PerFile.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
+        foreach ($entry in ($fileRanked | Select-Object -First $TopCount)) {
+            Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name)
+        }
         foreach ($key in $segment.Candidates.Keys) { $seen[$key] = $true }
     }
 
