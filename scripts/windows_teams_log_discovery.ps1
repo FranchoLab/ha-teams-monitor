@@ -35,10 +35,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $PackageRelativeLogPath = 'Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Logs'
-$MarkerKeywords = 'call|meeting|join|leave|left|hang|end|disconnect|connect|ring|incoming|mute|state|status|presence|activity|busy|conversation|room|lobby|event|type|action|phase|transition|operation|result|outcome|reason|connection'
 $SensitiveKeyPattern = 'name|title|subject|user|display|mail|upn|tenant|id$|ids$|uri|url|link|message|text|body|topic|organi[sz]er|participant|thread|phone|number|token|key|secret|path|file|folder|directory|location|host|address|caller|callee|sender|recipient|attendee|member|person|contact|alias|account|identity|owner|creator|from'
 $KeyValuePattern = [regex]'(?<key>[A-Za-z_][A-Za-z0-9_.\-]{1,48})"?\s*[:=]\s*"?(?<value>[A-Za-z_][A-Za-z0-9_.\-]{0,31})\b'
-$MarkerRegex = [regex]::new($MarkerKeywords, 'IgnoreCase')
 $StateValueWords = @(
     'active', 'call', 'connected', 'connecting', 'connection',
     'conversation', 'ended', 'ending', 'false', 'hang', 'hangup', 'idle', 'in',
@@ -50,6 +48,9 @@ $StateValueWords = @(
 $SensitiveKeyRegex = [regex]::new($SensitiveKeyPattern, 'IgnoreCase')
 $SafePropertyNameRegex = [regex]'^[A-Za-z_][A-Za-z0-9_.\-]{0,47}$'
 $SafePropertyPathRegex = [regex]'^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,191}$'
+$CallContextWords = @('call', 'meeting', 'conversation', 'conference')
+$StateSignalWords = @('active', 'connected', 'connecting', 'disconnect', 'disconnected', 'end', 'ended', 'ending', 'hang', 'hangup', 'idle', 'inactive', 'incoming', 'join', 'joined', 'joining', 'leave', 'leaving', 'left', 'lobby', 'mute', 'muted', 'ring', 'ringing', 'state', 'status', 'unmuted')
+$EventFieldWords = @('action', 'event', 'operation', 'outcome', 'phase', 'reason', 'result', 'transition', 'type')
 
 $Report = New-Object System.Collections.Generic.List[string]
 
@@ -152,15 +153,17 @@ function Get-RelativeShape {
 function Add-FieldCandidate {
     param([string]$Key, [object]$Value, [hashtable]$Counts)
     $leaf = ($Key -split '[.]')[-1] -replace '\[\]$', ''
-    if (-not $MarkerRegex.IsMatch($leaf) -or $SensitiveKeyRegex.IsMatch($Key)) { return }
+    if ($SensitiveKeyRegex.IsMatch($Key)) { return }
     if (-not $SafePropertyPathRegex.IsMatch($Key)) { return }
+
+    $safeValue = Get-SafeStateValue -Value $Value
+    if (-not (Test-StateFieldKey -Key $Key -Value $Value -SafeValue $safeValue)) { return }
 
     $safeKey = [regex]::Replace($Key, '[0-9]+', '#')
     $type = if ($null -eq $Value) { 'null' } elseif ($Value -is [bool]) { 'boolean' } elseif ($Value -is [string]) { 'string' } elseif ($Value -is [ValueType]) { 'number' } else { 'other' }
     $typeCandidate = "field:$safeKey`:$type"
     $Counts[$typeCandidate] = 1 + [int]$Counts[$typeCandidate]
 
-    $safeValue = Get-SafeStateValue -Value $Value
     if (-not $safeValue -and $type -eq 'number' -and $leaf -match '^(state|status|phase|result|outcome)$') {
         $number = 0
         if ([int]::TryParse([string]$Value, [ref]$number) -and $number -ge -1 -and $number -le 10) {
@@ -171,6 +174,28 @@ function Add-FieldCandidate {
         $valueCandidate = "field:$safeKey`:$safeValue"
         $Counts[$valueCandidate] = 1 + [int]$Counts[$valueCandidate]
     }
+}
+
+function Get-SemanticWords {
+    param([string]$Text)
+    $normalized = [regex]::Replace($Text, '([A-Z]+)([A-Z][a-z])', '$1 $2')
+    $normalized = [regex]::Replace($normalized, '([a-z0-9])([A-Z])', '$1 $2')
+    return @([regex]::Matches($normalized, '[A-Za-z]+') | ForEach-Object { $_.Value.ToLowerInvariant() })
+}
+
+function Test-StateFieldKey {
+    param([string]$Key, [object]$Value, [string]$SafeValue)
+    $keyWords = @(Get-SemanticWords -Text $Key)
+    $valueWords = if ($Value -is [string]) { @(Get-SemanticWords -Text $Value) } else { @() }
+    $hasCallContext = @($keyWords | Where-Object { $_ -in $CallContextWords }).Count -gt 0
+    $hasStateSignal = @($keyWords | Where-Object { $_ -in $StateSignalWords }).Count -gt 0
+    $hasEventField = @($keyWords | Where-Object { $_ -in $EventFieldWords }).Count -gt 0
+    $valueHasContext = @($valueWords | Where-Object { $_ -in $CallContextWords }).Count -gt 0
+    $valueHasSignal = @($valueWords | Where-Object { $_ -in $StateSignalWords }).Count -gt 0
+
+    if ($hasCallContext -and ($hasStateSignal -or $Value -is [bool] -or $valueHasSignal)) { return $true }
+    if ($hasEventField -and ($valueHasSignal -or $valueHasContext) -and $SafeValue) { return $true }
+    return $false
 }
 
 function Get-SafeStateValue {
