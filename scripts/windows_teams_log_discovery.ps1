@@ -11,7 +11,10 @@ The probe never prints or saves raw log lines. It reports only file-name shapes,
 sizes, encodings, line shapes (letters -> 'a', digits -> '9'), safe field names and
 types, allow-listed state values, and counts of call/state word pairs. Values that
 are not known state words and fields that could contain personal or meeting details
-are dropped. Review the report before sharing it anyway.
+are dropped. Capture polls continuously while waiting for state labels, keeps
+bounded read offsets so large writes are drained over successive polls, and reports
+record-timestamp age only when a recognized state candidate occurs on the same line.
+Those timestamps are clues, not proof of event time. Review the report before sharing it.
 
 It opens files read-only with sharing enabled, needs no elevation, and does not
 change Teams settings.
@@ -27,6 +30,8 @@ param(
     [string[]]$Labels = @(),
     [ValidateRange(1, 256)]
     [int]$MaxMegabytesPerRead = 16,
+    [ValidateRange(100, 10000)]
+    [int]$PollIntervalMilliseconds = 1000,
     [ValidateRange(1, 500)]
     [int]$TopCount = 40
 )
@@ -51,6 +56,7 @@ $SafePropertyPathRegex = [regex]'^[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,191}$'
 $CallContextWords = @('call', 'meeting', 'conversation', 'conference')
 $StateSignalWords = @('active', 'connected', 'connecting', 'disconnect', 'disconnected', 'end', 'ended', 'ending', 'hang', 'hangup', 'idle', 'inactive', 'incoming', 'join', 'joined', 'joining', 'leave', 'leaving', 'left', 'lobby', 'mute', 'muted', 'ring', 'ringing', 'state', 'status', 'unmuted')
 $EventFieldWords = @('action', 'event', 'operation', 'outcome', 'phase', 'reason', 'result', 'transition', 'type')
+$RecordTimestampRegex = [regex]'(?<!\d)(?<timestamp>20\d{2}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,7})?(?:Z|[+-]\d{2}:?\d{2})?)(?!\d)'
 
 $Report = New-Object System.Collections.Generic.List[string]
 
@@ -113,9 +119,14 @@ function Read-LogBytes {
         $start = $Offset
         $end = $length
         $skipped = [long]0
+        $deferred = [long]0
         if (($length - $start) -gt $MaxBytes) {
-            $skipped = ($length - $start) - $MaxBytes
-            if ($FromStart) { $end = $start + $MaxBytes } else { $start = $length - $MaxBytes }
+            $deferred = ($length - $start) - $MaxBytes
+            if ($FromStart) { $end = $start + $MaxBytes }
+            else {
+                $skipped = $deferred
+                $start = $length - $MaxBytes
+            }
         }
         $count = [int]($end - $start)
         $buffer = New-Object byte[] $count
@@ -126,8 +137,11 @@ function Read-LogBytes {
             if ($n -le 0) { break }
             $read += $n
         }
-        if ($read -lt $count) { $buffer = $buffer[0..([Math]::Max(0, $read - 1))] }
-        return [pscustomobject]@{ Bytes = $buffer; Length = $length; Skipped = $skipped }
+        if ($read -lt $count) {
+            if ($read -eq 0) { $buffer = [byte[]]@() }
+            else { $buffer = $buffer[0..($read - 1)] }
+        }
+        return [pscustomobject]@{ Bytes = $buffer; Length = $length; Skipped = $skipped; Deferred = $deferred }
     }
     finally {
         $stream.Dispose()
@@ -293,6 +307,28 @@ function Get-MarkerCandidates {
     return $counts
 }
 
+function Get-CandidateTimestampAges {
+    param([string]$Text, [datetime]$ObservedAt)
+    $ages = New-Object System.Collections.Generic.List[double]
+    foreach ($line in ($Text -split "`r?`n")) {
+        if (-not $line.Trim() -or (Get-MarkerCandidates -Text $line).Count -eq 0) { continue }
+        foreach ($match in $RecordTimestampRegex.Matches($line)) {
+            $timestamp = [DateTimeOffset]::MinValue
+            $parsed = [DateTimeOffset]::TryParse(
+                $match.Groups['timestamp'].Value,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeLocal,
+                [ref]$timestamp
+            )
+            if ($parsed) {
+                $observedTimestamp = [DateTimeOffset]$ObservedAt
+                $ages.Add($observedTimestamp.Subtract($timestamp).TotalSeconds)
+            }
+        }
+    }
+    return $ages.ToArray()
+}
+
 function Get-LineStats {
     param([string]$Text)
     $crlf = ([regex]::Matches($Text, "`r`n")).Count
@@ -316,7 +352,7 @@ function Write-Inventory {
     }
     Write-Report ''
     Write-Report '== Inventory'
-    $files = Get-LogFiles -Root $Root
+    $files = @(Get-LogFiles -Root $Root)
     Write-Report ("Files: {0}" -f $files.Count)
     foreach ($group in ($files | Group-Object { $_.Extension.ToLowerInvariant() } | Sort-Object Name)) {
         Write-Report ("  extension '{0}': {1}" -f $group.Name, $group.Count)
@@ -349,6 +385,7 @@ function Get-Snapshot {
     foreach ($file in (Get-LogFiles -Root $Root)) {
         $snapshot[$file.FullName] = [pscustomobject]@{
             Length = $file.Length
+            ReadOffset = $file.Length
             CreatedUtc = $file.CreationTimeUtc
         }
     }
@@ -361,14 +398,16 @@ function Read-Segment {
     $events = New-Object System.Collections.Generic.List[string]
     $combined = @{}
     $perFile = @{}
+    $timestampAges = New-Object System.Collections.Generic.List[double]
     $totalBytes = [long]0
     $totalLines = 0
+    $pendingBytes = [long]0
     $current = Get-Snapshot -Root $Root
     $vanished = New-Object System.Collections.Generic.List[object]
     foreach ($path in @($Offsets.Keys)) {
         if (-not $current.ContainsKey($path)) {
             $vanished.Add([pscustomobject]@{ Path = $path; Info = $Offsets[$path] })
-            $Offsets.Remove($path)
+            [void]$Offsets.Remove($path)
         }
     }
     # A file that reappears under a new name with the same creation time was renamed, not rewritten.
@@ -395,23 +434,25 @@ function Read-Segment {
             $previous = $Offsets[$path]
             if ($info.CreatedUtc -ne $previous.CreatedUtc) {
                 $events.Add(("replaced (new creation time): {0}" -f $shape))
+                [void]$Encodings.Remove($path)
             }
             elseif ($info.Length -lt $previous.Length) {
                 $events.Add(("truncated: {0}" -f $shape))
+                [void]$Encodings.Remove($path)
             }
             else {
-                $offset = $previous.Length
+                $offset = if ($previous.PSObject.Properties['ReadOffset']) { $previous.ReadOffset } else { $previous.Length }
             }
         }
         else {
             $events.Add(("new file: {0}" -f $shape))
         }
         if ($info.Length -le $offset) {
-            $Offsets[$path] = $info
+            $Offsets[$path] = [pscustomobject]@{ Length = $info.Length; ReadOffset = $offset; CreatedUtc = $info.CreatedUtc }
             continue
         }
         try {
-            $chunk = Read-LogBytes -Path $path -Offset $offset -MaxBytes $maxBytes
+            $chunk = Read-LogBytes -Path $path -Offset $offset -MaxBytes $maxBytes -FromStart
         }
         catch {
             $events.Add(("unreadable ({0}): {1}" -f $_.Exception.GetType().Name, $shape))
@@ -420,7 +461,12 @@ function Read-Segment {
         if ($chunk.Skipped -gt 0) {
             $events.Add(("skipped {0} bytes beyond read cap: {1}" -f $chunk.Skipped, $shape))
         }
-        $Offsets[$path] = [pscustomobject]@{ Length = $chunk.Length; CreatedUtc = $info.CreatedUtc }
+        $readOffset = $offset + $chunk.Bytes.Length
+        $Offsets[$path] = [pscustomobject]@{ Length = $chunk.Length; ReadOffset = $readOffset; CreatedUtc = $info.CreatedUtc }
+        if ($chunk.Deferred -gt 0) {
+            $events.Add(("deferred {0} bytes until next poll: {1}" -f $chunk.Deferred, $shape))
+        }
+        $pendingBytes += [Math]::Max([long]0, $chunk.Length - $readOffset)
         if (-not $Encodings.ContainsKey($path) -or $offset -eq 0) {
             $Encodings[$path] = Get-EncodingName -Bytes (Read-LogBytes -Path $path -Offset 0 -MaxBytes 4096 -FromStart).Bytes
         }
@@ -432,6 +478,9 @@ function Read-Segment {
         $text = ConvertFrom-LogBytes -Bytes $bytes -EncodingName $encoding
         $totalBytes += $bytes.Length
         $totalLines += (Get-LineStats -Text $text).Lines.Count
+        foreach ($age in (Get-CandidateTimestampAges -Text $text -ObservedAt (Get-Date))) {
+            $timestampAges.Add($age)
+        }
         $candidates = Get-MarkerCandidates -Text $text
         foreach ($key in $candidates.Keys) {
             $combined[$key] = [int]$combined[$key] + $candidates[$key]
@@ -445,50 +494,156 @@ function Read-Segment {
         PerFile = $perFile
         Bytes = $totalBytes
         Lines = $totalLines
+        TimestampAges = $timestampAges
+        PendingBytes = $pendingBytes
+        ObservedAt = Get-Date
+    }
+}
+
+function New-CaptureAggregate {
+    return @{
+        Candidates = @{}
+        PerFile = @{}
+        Events = (New-Object System.Collections.Generic.List[string])
+        TimestampAges = (New-Object System.Collections.Generic.List[double])
+        Bytes = [long]0
+        Lines = 0
+        Polls = 0
+        DataPolls = 0
+        PendingBytes = [long]0
+        FirstObservedAt = $null
+        LastObservedAt = $null
+    }
+}
+
+function Add-CaptureSample {
+    param([hashtable]$Aggregate, [object]$Sample)
+    $Aggregate.Polls++
+    $Aggregate.PendingBytes = $Sample.PendingBytes
+    if ($Sample.Bytes -gt 0) {
+        $Aggregate.DataPolls++
+        $Aggregate.Bytes += $Sample.Bytes
+        $Aggregate.Lines += $Sample.Lines
+        if ($null -eq $Aggregate.FirstObservedAt) { $Aggregate.FirstObservedAt = $Sample.ObservedAt }
+        $Aggregate.LastObservedAt = $Sample.ObservedAt
+    }
+    foreach ($key in $Sample.Candidates.Keys) {
+        $Aggregate.Candidates[$key] = [int]$Aggregate.Candidates[$key] + $Sample.Candidates[$key]
+    }
+    foreach ($key in $Sample.PerFile.Keys) {
+        $Aggregate.PerFile[$key] = [int]$Aggregate.PerFile[$key] + $Sample.PerFile[$key]
+    }
+    foreach ($age in $Sample.TimestampAges) { $Aggregate.TimestampAges.Add([double]$age) }
+    foreach ($event in $Sample.Events) {
+        if ($Aggregate.Events.Count -lt $TopCount) { $Aggregate.Events.Add($event) }
+    }
+}
+
+function Read-CaptureTransition {
+    param(
+        [string]$Prompt,
+        [string]$PresetLabel,
+        [bool]$PollCurrentState,
+        [string]$Root,
+        [hashtable]$Offsets,
+        [hashtable]$Encodings
+    )
+    if ([Console]::IsInputRedirected) {
+        throw 'Interactive console input is required for continuous log polling.'
+    }
+
+    $inputText = New-Object System.Text.StringBuilder
+    $samples = New-Object System.Collections.Generic.List[object]
+    $nextPoll = Get-Date
+    [Console]::Write($Prompt)
+
+    while ($true) {
+        while ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq [ConsoleKey]::Enter) {
+                [Console]::WriteLine()
+                $entered = $inputText.ToString().Trim()
+                if ($entered -eq '' -and $PresetLabel) { $entered = $PresetLabel }
+                if ($PollCurrentState) {
+                    $samples.Add((Read-Segment -Root $Root -Offsets $Offsets -Encodings $Encodings))
+                }
+                if ($entered -ne '') {
+                    return [pscustomobject]@{ Label = $entered; Samples = $samples }
+                }
+                [Console]::Write($Prompt)
+            }
+            elseif ($key.Key -eq [ConsoleKey]::Backspace) {
+                if ($inputText.Length -gt 0) {
+                    $inputText.Length = $inputText.Length - 1
+                    [Console]::Write("`b `b")
+                }
+            }
+            elseif (-not [char]::IsControl($key.KeyChar)) {
+                [void]$inputText.Append($key.KeyChar)
+                [Console]::Write($key.KeyChar)
+            }
+        }
+
+        $now = Get-Date
+        if ($PollCurrentState -and $now -ge $nextPoll) {
+            $samples.Add((Read-Segment -Root $Root -Offsets $Offsets -Encodings $Encodings))
+            $nextPoll = $now.AddMilliseconds($PollIntervalMilliseconds)
+        }
+        Start-Sleep -Milliseconds 100
     }
 }
 
 function Write-CaptureSegment {
     param(
-        [string]$Root,
         [string]$Label,
         [datetime]$StartTime,
-        [hashtable]$Offsets,
-        [hashtable]$Encodings,
+        [hashtable]$Aggregate,
         [hashtable]$Seen,
         [System.Collections.Generic.List[object]]$Segments
     )
-    $now = Get-Date
-    $segment = Read-Segment -Root $Root -Offsets $Offsets -Encodings $Encodings
-    $elapsed = [Math]::Round(($now - $StartTime).TotalSeconds, 1)
-    $Segments.Add([pscustomobject]@{ Label = $Label; Candidates = $segment.Candidates })
+    $elapsed = [Math]::Round(((Get-Date) - $StartTime).TotalSeconds, 1)
+    $Segments.Add([pscustomobject]@{ Label = $Label; Candidates = $Aggregate.Candidates })
 
     Write-Report ''
-    Write-Report ("-- Segment '{0}': {1}s, {2} bytes, {3} non-empty lines appended" -f $Label, $elapsed, $segment.Bytes, $segment.Lines)
-    foreach ($event in $segment.Events) { Write-Report ("  file event: {0}" -f $event) }
-    $ranked = $segment.Candidates.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
+    Write-Report ("-- Segment '{0}': {1}s, {2} bytes, {3} non-empty lines, {4} polls with {5} data-bearing polls" -f $Label, $elapsed, $Aggregate.Bytes, $Aggregate.Lines, $Aggregate.Polls, $Aggregate.DataPolls)
+    if ($null -ne $Aggregate.FirstObservedAt) {
+        Write-Report ("  data observed from {0:o} to {1:o}" -f $Aggregate.FirstObservedAt.ToUniversalTime(), $Aggregate.LastObservedAt.ToUniversalTime())
+    }
+    if ($Aggregate.PendingBytes -gt 0) {
+        Write-Report ("  bytes pending after final poll: {0}" -f $Aggregate.PendingBytes)
+    }
+    if ($Aggregate.TimestampAges.Count -gt 0) {
+        $minimumAge = ($Aggregate.TimestampAges | Measure-Object -Minimum).Minimum
+        $maximumAge = ($Aggregate.TimestampAges | Measure-Object -Maximum).Maximum
+        Write-Report ("  candidate-line timestamp age at read: count={0}, range={1:F1}..{2:F1}s (negative may indicate clock offset)" -f $Aggregate.TimestampAges.Count, $minimumAge, $maximumAge)
+    }
+    else {
+        Write-Report '  candidate-line timestamps: none recognized'
+    }
+    foreach ($event in $Aggregate.Events) { Write-Report ("  file event: {0}" -f $event) }
+    $ranked = $Aggregate.Candidates.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
     $newOnes = @($ranked | Where-Object { -not $Seen.ContainsKey($_.Name) } | Select-Object -First $TopCount)
     Write-Report ("  first-seen candidates ({0}):" -f $newOnes.Count)
     foreach ($entry in $newOnes) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
     Write-Report '  most frequent candidates:'
     foreach ($entry in ($ranked | Select-Object -First $TopCount)) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
     Write-Report '  candidate signatures by sanitized file-name shape:'
-    $fileRanked = $segment.PerFile.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
+    $fileRanked = $Aggregate.PerFile.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
     foreach ($entry in ($fileRanked | Select-Object -First $TopCount)) {
         Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name)
     }
-    foreach ($key in $segment.Candidates.Keys) { $Seen[$key] = $true }
+    foreach ($key in $Aggregate.Candidates.Keys) { $Seen[$key] = $true }
 }
 
 function Invoke-Capture {
     param([string]$Root)
     Write-Report ''
     Write-Report '== Capture'
-    Write-Report 'When Teams is in a state, type its label to start capturing that state.'
-    Write-Report 'Keep that state for about 30 seconds. When it changes, type the next state label.'
-    Write-Report 'Type q to finish and capture the state currently in progress.'
+    Write-Report ("Logs are polled every {0} ms while you enter a state label or wait for the next transition." -f $PollIntervalMilliseconds)
+    Write-Report 'Enter a label when Teams enters that state; type the next label at each transition.'
+    Write-Report 'Type q to capture and finish the current state. Event timestamp ages are clues, not proof.'
     Write-Report 'Suggested order: idle, prejoin, joined, muted, unmuted, left, ringing, declined, joined2, left2.'
-    Write-Report 'Each segment is attributed to the label entered at its start, not at its end.'
+    Write-Report 'Each interval is attributed to the label active while log bytes are observed.'
 
     $offsets = Get-Snapshot -Root $Root
     $encodings = @{}
@@ -500,20 +655,29 @@ function Invoke-Capture {
     }
     $currentLabel = $null
     $lastMark = $null
+    $currentAggregate = New-CaptureAggregate
 
     while ($true) {
+        $preset = ''
         if ($queue.Count -gt 0) {
-            $label = $queue.Dequeue()
-            Read-Host ("Press Enter when Teams enters state '{0}'" -f $label) | Out-Null
+            $preset = $queue.Dequeue()
+            $prompt = "Press Enter when Teams enters state '$preset' (or type q): "
         }
         else {
-            $label = Read-Host 'State label to start/transition to (q closes the current state)'
+            $prompt = if ($currentLabel) {
+                "State now '$currentLabel'; enter the next label or q to finish: "
+            }
+            else {
+                'Enter the current Teams state label to begin: '
+            }
         }
-        if ($null -eq $label) { break }
+        $transition = Read-CaptureTransition -Prompt $prompt -PresetLabel $preset -PollCurrentState ([bool]$currentLabel) -Root $Root -Offsets $offsets -Encodings $encodings
+        foreach ($sample in $transition.Samples) { Add-CaptureSample -Aggregate $currentAggregate -Sample $sample }
+        $label = $transition.Label
         $label = $label.Trim()
         if ($label -eq 'q') {
             if ($currentLabel) {
-                Write-CaptureSegment -Root $Root -Label $currentLabel -StartTime $lastMark -Offsets $offsets -Encodings $encodings -Seen $seen -Segments $segments
+                Write-CaptureSegment -Label $currentLabel -StartTime $lastMark -Aggregate $currentAggregate -Seen $seen -Segments $segments
             }
             break
         }
@@ -521,10 +685,11 @@ function Invoke-Capture {
         $label = [regex]::Replace($label, '[^A-Za-z0-9_\-]', '_')
 
         if ($currentLabel) {
-            Write-CaptureSegment -Root $Root -Label $currentLabel -StartTime $lastMark -Offsets $offsets -Encodings $encodings -Seen $seen -Segments $segments
+            Write-CaptureSegment -Label $currentLabel -StartTime $lastMark -Aggregate $currentAggregate -Seen $seen -Segments $segments
         }
         $currentLabel = $label
         $lastMark = Get-Date
+        $currentAggregate = New-CaptureAggregate
     }
 
     if ($segments.Count -lt 2) { return }

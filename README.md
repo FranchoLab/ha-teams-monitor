@@ -160,10 +160,13 @@ Leave it in that state for about 30 seconds; when changing states, enter the nex
 label. Enter `q` to capture and finish the final state. The report attributes each
 interval to its starting label.
 
-It prints and saves (under `%TEMP%`) only masked file-name shapes, encodings,
-file rotation events, safe field names and types, allow-listed state values, and
-counts of call/state word pairs per labelled interval. Unknown field values and
-raw log lines are never printed or saved. Review the report before sharing it.
+It polls logs continuously while waiting for each label and drains large writes
+over bounded reads. The report includes only masked file-name shapes, encodings,
+file rotation events, safe field names and types, allow-listed state values,
+counts of call/state word pairs, and the age at read of parseable timestamps on
+candidate lines. Timestamp age is only a clue: log timestamps may not represent
+the time an event occurred. Unknown field values and raw log lines are never
+printed or saved. Review the report before sharing it.
 
 ### Optional macOS login agent
 
