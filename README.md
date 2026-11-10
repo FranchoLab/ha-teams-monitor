@@ -155,6 +155,11 @@ pre-join, joined, muted, left, and ringing:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows_teams_log_discovery.ps1
 ```
 
+When Teams is in a state, enter that state's label to begin its capture interval.
+Leave it in that state for about 30 seconds; when changing states, enter the next
+label. Enter `q` to capture and finish the final state. The report attributes each
+interval to its starting label.
+
 It prints and saves (under `%TEMP%`) only masked file-name shapes, encodings,
 file rotation events, safe field names and types, allow-listed state values, and
 counts of call/state word pairs per labelled interval. Unknown field values and

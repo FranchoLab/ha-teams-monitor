@@ -448,14 +448,47 @@ function Read-Segment {
     }
 }
 
+function Write-CaptureSegment {
+    param(
+        [string]$Root,
+        [string]$Label,
+        [datetime]$StartTime,
+        [hashtable]$Offsets,
+        [hashtable]$Encodings,
+        [hashtable]$Seen,
+        [System.Collections.Generic.List[object]]$Segments
+    )
+    $now = Get-Date
+    $segment = Read-Segment -Root $Root -Offsets $Offsets -Encodings $Encodings
+    $elapsed = [Math]::Round(($now - $StartTime).TotalSeconds, 1)
+    $Segments.Add([pscustomobject]@{ Label = $Label; Candidates = $segment.Candidates })
+
+    Write-Report ''
+    Write-Report ("-- Segment '{0}': {1}s, {2} bytes, {3} non-empty lines appended" -f $Label, $elapsed, $segment.Bytes, $segment.Lines)
+    foreach ($event in $segment.Events) { Write-Report ("  file event: {0}" -f $event) }
+    $ranked = $segment.Candidates.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
+    $newOnes = @($ranked | Where-Object { -not $Seen.ContainsKey($_.Name) } | Select-Object -First $TopCount)
+    Write-Report ("  first-seen candidates ({0}):" -f $newOnes.Count)
+    foreach ($entry in $newOnes) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
+    Write-Report '  most frequent candidates:'
+    foreach ($entry in ($ranked | Select-Object -First $TopCount)) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
+    Write-Report '  candidate signatures by sanitized file-name shape:'
+    $fileRanked = $segment.PerFile.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
+    foreach ($entry in ($fileRanked | Select-Object -First $TopCount)) {
+        Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name)
+    }
+    foreach ($key in $segment.Candidates.Keys) { $Seen[$key] = $true }
+}
+
 function Invoke-Capture {
     param([string]$Root)
     Write-Report ''
     Write-Report '== Capture'
-    Write-Report 'Change Teams to a state, wait about 30 seconds, then type that state label.'
-    Write-Report 'Each label summarizes log changes since the previous label; the first covers time since capture started.'
+    Write-Report 'When Teams is in a state, type its label to start capturing that state.'
+    Write-Report 'Keep that state for about 30 seconds. When it changes, type the next state label.'
+    Write-Report 'Type q to finish and capture the state currently in progress.'
     Write-Report 'Suggested order: idle, prejoin, joined, muted, unmuted, left, ringing, declined, joined2, left2.'
-    Write-Report 'Each segment covers log data appended since the previous label. Type q to finish.'
+    Write-Report 'Each segment is attributed to the label entered at its start, not at its end.'
 
     $offsets = Get-Snapshot -Root $Root
     $encodings = @{}
@@ -465,43 +498,33 @@ function Invoke-Capture {
     foreach ($label in ($Labels | ForEach-Object { $_ -split ',' })) {
         if ($label.Trim() -ne '') { $queue.Enqueue($label.Trim()) }
     }
-    $lastMark = Get-Date
+    $currentLabel = $null
+    $lastMark = $null
 
     while ($true) {
         if ($queue.Count -gt 0) {
             $label = $queue.Dequeue()
-            Read-Host ("Press Enter when Teams is in state '{0}'" -f $label) | Out-Null
+            Read-Host ("Press Enter when Teams enters state '{0}'" -f $label) | Out-Null
         }
         else {
-            $label = Read-Host 'State label (q to finish)'
+            $label = Read-Host 'State label to start/transition to (q closes the current state)'
         }
         if ($null -eq $label) { break }
         $label = $label.Trim()
-        if ($label -eq 'q') { break }
+        if ($label -eq 'q') {
+            if ($currentLabel) {
+                Write-CaptureSegment -Root $Root -Label $currentLabel -StartTime $lastMark -Offsets $offsets -Encodings $encodings -Seen $seen -Segments $segments
+            }
+            break
+        }
         if ($label -eq '') { continue }
         $label = [regex]::Replace($label, '[^A-Za-z0-9_\-]', '_')
 
-        $now = Get-Date
-        $segment = Read-Segment -Root $Root -Offsets $offsets -Encodings $encodings
-        $elapsed = [Math]::Round(($now - $lastMark).TotalSeconds, 1)
-        $lastMark = $now
-        $segments.Add([pscustomobject]@{ Label = $label; Candidates = $segment.Candidates })
-
-        Write-Report ''
-        Write-Report ("-- Segment '{0}': {1}s, {2} bytes, {3} non-empty lines appended" -f $label, $elapsed, $segment.Bytes, $segment.Lines)
-        foreach ($event in $segment.Events) { Write-Report ("  file event: {0}" -f $event) }
-        $ranked = $segment.Candidates.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
-        $newOnes = @($ranked | Where-Object { -not $seen.ContainsKey($_.Name) } | Select-Object -First $TopCount)
-        Write-Report ("  first-seen candidates ({0}):" -f $newOnes.Count)
-        foreach ($entry in $newOnes) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
-        Write-Report '  most frequent candidates:'
-        foreach ($entry in ($ranked | Select-Object -First $TopCount)) { Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name) }
-        Write-Report '  candidate signatures by sanitized file-name shape:'
-        $fileRanked = $segment.PerFile.GetEnumerator() | Sort-Object -Property @{ Expression = 'Value'; Descending = $true }, @{ Expression = 'Name'; Descending = $false }
-        foreach ($entry in ($fileRanked | Select-Object -First $TopCount)) {
-            Write-Report ("    {0,6}  {1}" -f $entry.Value, $entry.Name)
+        if ($currentLabel) {
+            Write-CaptureSegment -Root $Root -Label $currentLabel -StartTime $lastMark -Offsets $offsets -Encodings $encodings -Seen $seen -Segments $segments
         }
-        foreach ($key in $segment.Candidates.Keys) { $seen[$key] = $true }
+        $currentLabel = $label
+        $lastMark = Get-Date
     }
 
     if ($segments.Count -lt 2) { return }
